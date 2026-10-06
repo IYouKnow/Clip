@@ -34,7 +34,8 @@ fn main() -> anyhow::Result<()> {
     for index in 0..FRAMES {
         fill(&mut data, index);
         let pts = index as i64 * 1_000_000 / FPS as i64;
-        for packet in encoder.encode_bgra(&data, pts)? {
+        // The generated buffer is tightly packed, so pitch == row length.
+        for packet in encoder.encode_bgra(&data, row, pts)? {
             ring.push(packet);
         }
     }

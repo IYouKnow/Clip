@@ -24,10 +24,13 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// A captured frame, tightly packed (no row padding), ready to send across threads.
+/// A captured frame, in the device's BGRA layout with row padding preserved.
 #[derive(Debug)]
 pub struct CapturedFrame {
+    /// Raw pixels, `pitch * height` bytes.
     pub data: Vec<u8>,
+    /// Bytes per row, including any padding.
+    pub pitch: usize,
     pub width: u32,
     pub height: u32,
     pub timestamp_micros: i64,
@@ -47,19 +50,22 @@ impl CaptureHandle {
 
 /// Starts capturing the primary monitor, forwarding frames to `sink`.
 ///
-/// Frames stop arriving when the picture is unchanged, which is what keeps the
-/// encoder idle on a static desktop.
+/// `fps` throttles delivery at the OS level so the encoder is not handed a
+/// frame for every compositor update (which on a high-refresh display is far
+/// more work than is needed for a 60 fps clip).
 pub fn start_monitor_capture(
     sink: Sender<CapturedFrame>,
     stop: Arc<AtomicBool>,
+    fps: u32,
 ) -> anyhow::Result<CaptureHandle> {
     let monitor = Monitor::primary()?;
+    let interval = Duration::from_micros(1_000_000 / fps.max(1) as u64);
     let settings = Settings::new(
         monitor,
         CursorCaptureSettings::WithCursor,
         DrawBorderSettings::WithoutBorder,
         SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Default,
+        MinimumUpdateIntervalSettings::Custom(interval),
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         (sink, stop),
@@ -99,12 +105,14 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
             return Ok(());
         }
 
-        // Every frame is forwarded, including an initial blank one: the frame
-        // dimensions are valid regardless, and on a static desktop these may be
-        // the only frames that arrive. WGC only delivers on change.
-        let (data, width, height) = {
+        // A single copy of the raw buffer: row padding is kept and handled by
+        // the encoder, which avoids repacking the frame first.
+        let (data, pitch, width, height) = {
             let mut buffer = frame.buffer()?;
-            tight_copy(&mut buffer)
+            let pitch = buffer.row_pitch() as usize;
+            let width = buffer.width();
+            let height = buffer.height();
+            (buffer.as_raw_buffer().to_vec(), pitch, width, height)
         };
         let timestamp_micros = self.start.elapsed().as_micros() as i64;
 
@@ -113,6 +121,7 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
             .sink
             .send(CapturedFrame {
                 data,
+                pitch,
                 width,
                 height,
                 timestamp_micros,
@@ -124,24 +133,6 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
 
         Ok(())
     }
-}
-
-/// Copies a frame into a tightly packed BGRA buffer, dropping row padding.
-fn tight_copy(buffer: &mut FrameBuffer<'_>) -> (Vec<u8>, u32, u32) {
-    let width = buffer.width();
-    let height = buffer.height();
-    let row = (width * 4) as usize;
-    let pitch = buffer.row_pitch() as usize;
-    let raw = buffer.as_raw_buffer();
-
-    let mut data = vec![0u8; row * height as usize];
-    for y in 0..height as usize {
-        let start = y * pitch;
-        if start + row <= raw.len() {
-            data[y * row..y * row + row].copy_from_slice(&raw[start..start + row]);
-        }
-    }
-    (data, width, height)
 }
 
 /// Grabs the first non-empty frame of the primary monitor and writes it as a PNG.

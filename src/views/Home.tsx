@@ -6,6 +6,9 @@ type Props = {
   onChanged: () => void;
 };
 
+/// Encoders that typically run on the CPU rather than a GPU block.
+const SOFTWARE_ENCODERS = ["h264_mf", "libx264"];
+
 export default function Home({ status, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +64,14 @@ export default function Home({ status, onChanged }: Props) {
 
       {error && <div className="banner error">{error}</div>}
 
+      {status?.encoder && SOFTWARE_ENCODERS.includes(status.encoder) && (
+        <div className="banner warn">
+          Using <strong>{status.encoder}</strong>, which may be a software encoder — that
+          uses a lot of CPU and can make the whole PC feel slow. If your GPU supports it,
+          check that its driver is installed so a hardware encoder can be used.
+        </div>
+      )}
+
       <section className="card">
         <h2>Status</h2>
         <dl className="stats">
@@ -75,6 +86,10 @@ export default function Home({ status, onChanged }: Props) {
           <div>
             <dt>Packets buffered</dt>
             <dd>{status?.packets ?? 0}</dd>
+          </div>
+          <div>
+            <dt>Frames skipped</dt>
+            <dd>{status?.dropped ?? 0}</dd>
           </div>
           <div>
             <dt>Capture</dt>

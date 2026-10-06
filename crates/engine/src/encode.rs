@@ -1,6 +1,7 @@
 //! H.264 encoding of captured frames, plus encoder selection.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Result};
 use ffmpeg_next as ffmpeg;
@@ -27,15 +28,40 @@ pub struct EncoderInfo {
     pub available: bool,
 }
 
-/// Reports which known H.264 encoders this FFmpeg build exposes.
+/// Reports which known H.264 encoders are usable on this machine.
+///
+/// An encoder can be compiled into FFmpeg yet still fail to open (for example
+/// NVENC without a driver), so once an attempt fails it is remembered.
 pub fn h264_encoders() -> Vec<EncoderInfo> {
     H264_ENCODERS
         .iter()
         .map(|name| EncoderInfo {
             name: (*name).to_string(),
-            available: ffmpeg_next::encoder::find_by_name(name).is_some(),
+            available: ffmpeg_next::encoder::find_by_name(name).is_some() && !is_unusable(name),
         })
         .collect()
+}
+
+/// Encoders that failed to open on this machine.
+///
+/// Retrying them on every start spams driver errors and wastes time, so the
+/// failure is remembered for the lifetime of the process.
+fn unusable() -> &'static Mutex<HashSet<String>> {
+    static UNUSABLE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    UNUSABLE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn is_unusable(name: &str) -> bool {
+    unusable()
+        .lock()
+        .map(|set| set.contains(name))
+        .unwrap_or(false)
+}
+
+fn mark_unusable(name: &str) {
+    if let Ok(mut set) = unusable().lock() {
+        set.insert(name.to_string());
+    }
 }
 
 /// Picks the best available H.264 encoder for this machine.
@@ -92,12 +118,15 @@ impl VideoEncoder {
 
         let mut last_error = None;
         for name in candidates {
-            if ffmpeg::encoder::find_by_name(name).is_none() {
+            if is_unusable(name) || ffmpeg::encoder::find_by_name(name).is_none() {
                 continue;
             }
             match open(name, width, height, fps, bitrate) {
                 Ok(encoder) => return Self::finish(encoder, width, height, fps, name),
-                Err(error) => last_error = Some(error),
+                Err(error) => {
+                    mark_unusable(name);
+                    last_error = Some(error);
+                }
             }
         }
 
@@ -151,11 +180,18 @@ impl VideoEncoder {
         &self.name
     }
 
-    /// Encodes one BGRA frame (tightly packed, `width * 4` bytes per row) at
-    /// `pts` microseconds, returning any packets the encoder produced.
-    pub fn encode_bgra(&mut self, bgra: &[u8], pts: i64) -> Result<Vec<Packet>> {
+    /// Encodes one BGRA frame at `pts` microseconds, returning any packets the
+    /// encoder produced.
+    ///
+    /// `bgra` keeps the device's row padding (`pitch` bytes per row), which is
+    /// copied row by row into the scaler's input frame.
+    pub fn encode_bgra(&mut self, bgra: &[u8], pitch: usize, pts: i64) -> Result<Vec<Packet>> {
         let row = (self.width * 4) as usize;
-        let needed = row * self.height as usize;
+        anyhow::ensure!(pitch >= row, "row pitch {pitch} smaller than row {row}");
+        let needed = (self.height as usize - 1)
+            .checked_mul(pitch)
+            .map(|offset| offset + row)
+            .unwrap_or(0);
         anyhow::ensure!(
             bgra.len() >= needed,
             "frame buffer too small: {} < {needed}",
@@ -166,7 +202,7 @@ impl VideoEncoder {
         {
             let dest = self.scratch.data_mut(0);
             for y in 0..self.height as usize {
-                let src = &bgra[y * row..y * row + row];
+                let src = &bgra[y * pitch..y * pitch + row];
                 dest[y * stride..y * stride + row].copy_from_slice(src);
             }
         }
@@ -225,11 +261,33 @@ fn open(
     fps: u32,
     bitrate: u64,
 ) -> Result<ffmpeg::encoder::video::Encoder> {
-    // Hardware encoders want NV12; fall back to YUV420P if a codec refuses.
-    match open_with_format(name, width, height, fps, bitrate, Pixel::NV12) {
-        Ok(encoder) => Ok(encoder),
-        Err(_) => open_with_format(name, width, height, fps, bitrate, Pixel::YUV420P),
+    // Hardware encoders want NV12 with low-latency tuning; some reject the
+    // options, so fall back to plain YUV420P.
+    if let Ok(encoder) = open_with(name, width, height, fps, bitrate, Pixel::NV12, latency_options(name))
+    {
+        return Ok(encoder);
     }
+    open_with(
+        name,
+        width,
+        height,
+        fps,
+        bitrate,
+        Pixel::YUV420P,
+        ffmpeg::Dictionary::new(),
+    )
+}
+
+fn open_with(
+    name: &str,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate: u64,
+    pixel_format: Pixel,
+    options: ffmpeg::Dictionary<'_>,
+) -> Result<ffmpeg::encoder::video::Encoder> {
+    Ok(build_video(name, width, height, fps, bitrate, pixel_format)?.open_with(options)?)
 }
 
 /// Low-latency tuning per encoder.
@@ -288,22 +346,4 @@ fn build_video(
     video.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
 
     Ok(video)
-}
-
-fn open_with_format(
-    name: &str,
-    width: u32,
-    height: u32,
-    fps: u32,
-    bitrate: u64,
-    pixel_format: Pixel,
-) -> Result<ffmpeg::encoder::video::Encoder> {
-    match build_video(name, width, height, fps, bitrate, pixel_format)?
-        .open_with(latency_options(name))
-    {
-        Ok(encoder) => Ok(encoder),
-        // An encoder may reject a tuning option it does not know; retry plain.
-        Err(_) => Ok(build_video(name, width, height, fps, bitrate, pixel_format)?
-            .open_with(ffmpeg::Dictionary::new())?),
-    }
 }

@@ -23,6 +23,7 @@ pub struct SessionStats {
     encoder: Mutex<Option<String>>,
     frames: AtomicU64,
     packets: AtomicU64,
+    dropped: AtomicU64,
 }
 
 impl SessionStats {
@@ -39,6 +40,12 @@ impl SessionStats {
     /// Encoded packets currently held for a future clip.
     pub fn packets(&self) -> u64 {
         self.packets.load(Ordering::Relaxed)
+    }
+
+    /// Frames discarded because the encoder was behind. Older frames are
+    /// dropped so the buffer keeps the most recent video.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     fn set_encoder(&self, name: &str) {
@@ -106,6 +113,7 @@ impl ReplaySession {
 
         let worker_dir = clips_dir.clone();
         let worker_stats = stats.clone();
+        let fps = config.fps;
         let worker = std::thread::Builder::new()
             .name("clipper23-encoder".into())
             .spawn(move || {
@@ -114,7 +122,7 @@ impl ReplaySession {
                 }
             })?;
 
-        let capture = capture::start_monitor_capture(frame_tx, stop.clone())?;
+        let capture = capture::start_monitor_capture(frame_tx, stop.clone(), fps)?;
 
         Ok(Self {
             commands: command_tx,
@@ -208,7 +216,18 @@ fn run(
     loop {
         select! {
             recv(frames) -> message => match message {
-                Ok(frame) => {
+                Ok(mut frame) => {
+                    // Keep only the newest frame: if the encoder fell behind,
+                    // encoding stale frames would grow latency and memory.
+                    let mut dropped = 0u64;
+                    while let Ok(newer) = frames.try_recv() {
+                        frame = newer;
+                        dropped += 1;
+                    }
+                    if dropped > 0 {
+                        stats.dropped.fetch_add(dropped, Ordering::Relaxed);
+                    }
+
                     if encoder.is_none() {
                         let opened = VideoEncoder::new(
                             config.encoder.as_deref(),
@@ -224,7 +243,9 @@ fn run(
 
                     stats.frames.fetch_add(1, Ordering::Relaxed);
                     let encoder = encoder.as_mut().unwrap();
-                    for packet in encoder.encode_bgra(&frame.data, frame.timestamp_micros)? {
+                    let packets =
+                        encoder.encode_bgra(&frame.data, frame.pitch, frame.timestamp_micros)?;
+                    for packet in packets {
                         ring.as_mut().unwrap().push(packet);
                         stats.packets.fetch_add(1, Ordering::Relaxed);
                     }

@@ -5,6 +5,7 @@ export type Status = {
   encoder: string | null;
   frames: number;
   packets: number;
+  dropped: number;
   buffer_seconds: number;
   fps: number;
   bitrate: number;
