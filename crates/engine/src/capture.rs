@@ -335,6 +335,15 @@ fn build_pipeline(
 ) -> Result<Pipeline, BoxError> {
     let width = frame.width();
     let height = frame.height();
+
+    // The GPU path is all-or-nothing and can be slow/flaky to probe; if it
+    // failed once in this process, go straight to CPU so we neither stall nor
+    // spam on every session.
+    static GPU_DISABLED: AtomicBool = AtomicBool::new(false);
+    if GPU_DISABLED.load(Ordering::Relaxed) {
+        return Ok(cpu_pipeline(width, height));
+    }
+
     let gpu = GpuDevice::from_parts(device.clone(), context.clone());
 
     // Create and validate the GPU conversion *before* building any FFmpeg
@@ -342,14 +351,16 @@ fn build_pipeline(
     let (texture, slices) = match hw::create_nv12_texture(&gpu, width, height, hw::FRAME_POOL_SIZE) {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("falling back to CPU capture: {error:#}");
+            GPU_DISABLED.store(true, Ordering::Relaxed);
+            log_gpu_fallback(&error);
             return Ok(cpu_pipeline(width, height));
         }
     };
     let processor = match VideoProcessor::new(&gpu, &texture, slices, width, height) {
         Ok(processor) => processor,
         Err(error) => {
-            eprintln!("falling back to CPU capture: {error:#}");
+            GPU_DISABLED.store(true, Ordering::Relaxed);
+            log_gpu_fallback(&error);
             return Ok(cpu_pipeline(width, height));
         }
     };
@@ -371,6 +382,18 @@ fn build_pipeline(
         width,
         height,
     })
+}
+
+/// Reports a GPU-path failure once per process.
+fn log_gpu_fallback(error: &anyhow::Error) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "GPU zero-copy unavailable on this display/driver, using CPU capture \
+             (frames are read back and converted on the CPU): {error:#}"
+        );
+    });
 }
 
 /// A pipeline for the pure-CPU fallback, which needs no GPU objects.
