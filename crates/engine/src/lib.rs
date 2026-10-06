@@ -5,6 +5,7 @@
 pub mod audio;
 pub mod capture;
 pub mod encode;
+pub mod hw;
 pub mod mux;
 pub mod ring;
 pub mod session;

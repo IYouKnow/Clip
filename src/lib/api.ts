@@ -3,9 +3,11 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 export type Status = {
   replaying: boolean;
   encoder: string | null;
+  pipeline: string | null;
   frames: number;
   packets: number;
   dropped: number;
+  idle: number;
   buffer_seconds: number;
   fps: number;
   bitrate: number;

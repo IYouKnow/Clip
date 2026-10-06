@@ -1,7 +1,13 @@
 //! H.264 encoding of captured frames, plus encoder selection.
+//!
+//! Two paths share this type:
+//! * **Zero-copy**: NVENC/AMF are opened with an attached D3D11 `hw_frames_ctx`
+//!   and are fed NV12 hardware frames straight off the GPU ([`encode_av_frame`]).
+//! * **CPU fallback**: a BGRA frame is colour-converted with swscale and encoded
+//!   with whatever encoder opened, used when no GPU path is available.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Result};
 use ffmpeg_next as ffmpeg;
@@ -10,16 +16,45 @@ use ffmpeg::software::scaling;
 use ffmpeg::util::frame::Video as VideoFrame;
 use ffmpeg::Packet;
 
+use crate::hw::HwFrames;
+
 /// Timestamps are carried as microseconds; 1/1_000_000 time base.
 pub const MICROS: i32 = 1_000_000;
 
 /// H.264 encoders in preference order.
 ///
-/// NVENC (NVIDIA) and AMF (AMD) are dedicated hardware; `h264_mf` uses Media
-/// Foundation and covers Intel plus any machine without the vendor encoders.
-/// `libx264` is deliberately last: the vendored FFmpeg is LGPL and does not
-/// ship it, but a custom GPL build would be picked up automatically.
-pub const H264_ENCODERS: &[&str] = &["h264_nvenc", "h264_amf", "h264_qsv", "h264_mf", "libx264"];
+/// NVENC (NVIDIA) and AMF (AMD) are dedicated hardware blocks and are the only
+/// encoders that accept D3D11 frames for a true zero-copy path. `h264_mf`
+/// (Media Foundation, usually Intel) and `libopenh264` are software/CPU
+/// fallbacks. `h264_qsv` and `libx264` are absent from the vendored LGPL build.
+pub const H264_ENCODERS: &[&str] = &["h264_nvenc", "h264_amf", "h264_mf", "libopenh264"];
+
+/// Encoders that can consume D3D11 hardware frames directly.
+pub fn is_zero_copy_encoder(name: &str) -> bool {
+    matches!(name, "h264_nvenc" | "h264_amf")
+}
+
+/// Which pipeline actually ended up in use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineKind {
+    /// GPU texture → GPU convert → hardware encoder. No CPU copy.
+    ZeroCopyGpu,
+    /// GPU texture → GPU convert → NV12 download → software encoder.
+    GpuConvertCpuEncode,
+    /// CPU readback → swscale → encoder (last-resort fallback).
+    CpuFallback,
+}
+
+impl PipelineKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            PipelineKind::ZeroCopyGpu => "zero-copy gpu",
+            PipelineKind::GpuConvertCpuEncode => "gpu convert, cpu encode",
+            PipelineKind::CpuFallback => "cpu fallback",
+        }
+    }
+}
 
 /// Availability of one candidate encoder.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -72,15 +107,36 @@ pub fn pick_h264_encoder() -> Option<&'static str> {
         .find(|name| ffmpeg_next::encoder::find_by_name(name).is_some())
 }
 
-/// Encodes BGRA frames to H.264 packets.
+/// Authoritatively checks whether a vendor hardware encoder can actually open
+/// with a D3D11 frame pool on this machine.
+///
+/// `has_zero_copy_encoder` only inspects the build; an encoder can be compiled
+/// in yet fail on the installed driver (for example NVENC without nvcuda.dll).
+/// The opened encoder is dropped immediately; only success is reported.
+pub fn probe_zero_copy(hw: &HwFrames, width: u32, height: u32, fps: u32, bitrate: u64) -> bool {
+    let _ = ffmpeg::init();
+    for name in H264_ENCODERS.iter().copied().filter(|n| is_zero_copy_encoder(n)) {
+        if is_unusable(name) || ffmpeg_next::encoder::find_by_name(name).is_none() {
+            continue;
+        }
+        if open(name, width, height, fps, bitrate, Some(hw)).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Encodes frames to H.264 packets.
 pub struct VideoEncoder {
     name: String,
+    kind: PipelineKind,
     encoder: ffmpeg::encoder::video::Encoder,
-    scaler: scaling::Context,
-    /// Pixel format the scaler produces (what the encoder accepts).
+    /// CPU colour converter, only for the BGRA fallback path.
+    scaler: Option<scaling::Context>,
+    /// Reused BGRA input frame for the fallback path.
+    scratch: Option<VideoFrame>,
+    /// Pixel format the scaler produces on the fallback path.
     out_format: Pixel,
-    /// Reused input frame in BGRA.
-    scratch: VideoFrame,
     width: u32,
     height: u32,
     /// Microseconds between frames, used to advance timestamps.
@@ -92,17 +148,35 @@ pub struct VideoEncoder {
     pending: VecDeque<i64>,
     /// Timestamp to continue from when the queue is exhausted (during flush).
     next_pts: i64,
+    /// Keeps the hardware frame pool alive while the encoder references it.
+    _hw_frames: Option<Arc<HwFrames>>,
 }
 
 impl VideoEncoder {
-    /// Opens `preferred` if given, otherwise the best available encoder,
-    /// falling back through the list when one fails to open.
+    /// Opens `preferred` (or the best available) encoder for CPU-supplied BGRA frames.
     pub fn new(
         preferred: Option<&str>,
         width: u32,
         height: u32,
         fps: u32,
         bitrate: u64,
+    ) -> Result<Self> {
+        Self::new_with_hw(preferred, width, height, fps, bitrate, None, false)
+    }
+
+    /// Opens the best encoder.
+    ///
+    /// `hw` supplies a D3D11 frame pool for the zero-copy path. `nv12_input`
+    /// says the caller will feed NV12 frames (hardware or downloaded) instead of
+    /// CPU BGRA, so no swscale stage is built.
+    pub fn new_with_hw(
+        preferred: Option<&str>,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u64,
+        hw: Option<Arc<HwFrames>>,
+        nv12_input: bool,
     ) -> Result<Self> {
         ffmpeg::init()?;
 
@@ -121,8 +195,26 @@ impl VideoEncoder {
             if is_unusable(name) || ffmpeg::encoder::find_by_name(name).is_none() {
                 continue;
             }
-            match open(name, width, height, fps, bitrate) {
-                Ok(encoder) => return Self::finish(encoder, width, height, fps, name),
+
+            // Only the vendor encoders can take D3D11 frames; everyone else
+            // gets CPU frames even when a GPU pool exists.
+            let use_hw = if is_zero_copy_encoder(name) {
+                hw.as_deref()
+            } else {
+                None
+            };
+
+            match open(name, width, height, fps, bitrate, use_hw) {
+                Ok(encoder) => {
+                    let kind = if use_hw.is_some() {
+                        PipelineKind::ZeroCopyGpu
+                    } else if nv12_input {
+                        PipelineKind::GpuConvertCpuEncode
+                    } else {
+                        PipelineKind::CpuFallback
+                    };
+                    return Self::finish(encoder, width, height, fps, name, kind, hw);
+                }
                 Err(error) => {
                     mark_unusable(name);
                     last_error = Some(error);
@@ -140,37 +232,46 @@ impl VideoEncoder {
         height: u32,
         fps: u32,
         name: &str,
+        kind: PipelineKind,
+        hw: Option<Arc<HwFrames>>,
     ) -> Result<Self> {
-        let pixel_format = encoder.format();
-
-        let scaler = scaling::Context::get(
-            Pixel::BGRA,
-            width,
-            height,
-            pixel_format,
-            width,
-            height,
-            scaling::Flags::BILINEAR,
-        )?;
+        let (scaler, scratch, out_format) = if kind == PipelineKind::CpuFallback {
+            let pixel_format = encoder.format();
+            let scaler = scaling::Context::get(
+                Pixel::BGRA,
+                width,
+                height,
+                pixel_format,
+                width,
+                height,
+                scaling::Flags::BILINEAR,
+            )?;
+            (
+                Some(scaler),
+                Some(VideoFrame::new(Pixel::BGRA, width, height)),
+                pixel_format,
+            )
+        } else {
+            (None, None, encoder.format())
+        };
 
         Ok(Self {
             name: name.to_string(),
+            kind,
             encoder,
             scaler,
-            out_format: pixel_format,
-            scratch: VideoFrame::new(Pixel::BGRA, width, height),
+            scratch,
+            out_format,
             width,
             height,
             interval_micros: 1_000_000 / fps.max(1) as i64,
             pending: VecDeque::new(),
             next_pts: 0,
+            _hw_frames: hw,
         })
     }
 
     /// The time base every packet is stamped with: microseconds.
-    ///
-    /// Encoders are free to rewrite their own `time_base` (NVENC/AMF do), so
-    /// timestamps are normalised to microseconds here instead of trusting it.
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational(1, MICROS)
     }
@@ -180,11 +281,24 @@ impl VideoEncoder {
         &self.name
     }
 
-    /// Encodes one BGRA frame at `pts` microseconds, returning any packets the
-    /// encoder produced.
-    ///
-    /// `bgra` keeps the device's row padding (`pitch` bytes per row), which is
-    /// copied row by row into the scaler's input frame.
+    /// Which pipeline is in use.
+    pub fn kind(&self) -> PipelineKind {
+        self.kind
+    }
+
+    /// Encodes an already-prepared frame (D3D11 hardware frame, or a CPU NV12
+    /// frame on the download path). Takes ownership of `frame`.
+    pub fn encode_av_frame(&mut self, frame: *mut ffmpeg_next::ffi::AVFrame, pts: i64) -> Result<Vec<Packet>> {
+        let mut wrapped = unsafe { ffmpeg::util::frame::Video::wrap(frame) };
+        wrapped.set_pts(Some(pts));
+
+        self.pending.push_back(pts);
+        self.encoder.send_frame(&wrapped)?;
+
+        Ok(self.drain())
+    }
+
+    /// Encodes one BGRA frame at `pts` microseconds (CPU fallback path).
     pub fn encode_bgra(&mut self, bgra: &[u8], pitch: usize, pts: i64) -> Result<Vec<Packet>> {
         let row = (self.width * 4) as usize;
         anyhow::ensure!(pitch >= row, "row pitch {pitch} smaller than row {row}");
@@ -198,18 +312,27 @@ impl VideoEncoder {
             bgra.len()
         );
 
-        let stride = self.scratch.stride(0);
+        let scaler = self
+            .scaler
+            .as_mut()
+            .ok_or_else(|| anyhow!("encoder does not accept CPU BGRA frames"))?;
+        let scratch = self
+            .scratch
+            .as_mut()
+            .ok_or_else(|| anyhow!("encoder does not accept CPU BGRA frames"))?;
+
+        let stride = scratch.stride(0);
         {
-            let dest = self.scratch.data_mut(0);
+            let dest = scratch.data_mut(0);
             for y in 0..self.height as usize {
                 let src = &bgra[y * pitch..y * pitch + row];
                 dest[y * stride..y * stride + row].copy_from_slice(src);
             }
         }
-        self.scratch.set_pts(Some(pts));
+        scratch.set_pts(Some(pts));
 
         let mut converted = VideoFrame::new(self.out_format, self.width, self.height);
-        self.scaler.run(&self.scratch, &mut converted)?;
+        scaler.run(scratch, &mut converted)?;
         converted.set_pts(Some(pts));
 
         self.pending.push_back(pts);
@@ -260,7 +383,18 @@ fn open(
     height: u32,
     fps: u32,
     bitrate: u64,
+    hw: Option<&HwFrames>,
 ) -> Result<ffmpeg::encoder::video::Encoder> {
+    // Hardware frames: the encoder is fed D3D11 textures directly.
+    if let Some(frames) = hw {
+        let mut video = build_video(name, width, height, fps, bitrate, Pixel::D3D11)?;
+        unsafe {
+            let context = video.as_mut_ptr();
+            (*context).hw_frames_ctx = ffmpeg_next::ffi::av_buffer_ref(frames.frames_ref());
+        }
+        return Ok(video.open_with(latency_options(name))?);
+    }
+
     // Hardware encoders want NV12 with low-latency tuning; some reject the
     // options, so fall back to plain YUV420P.
     if let Ok(encoder) = open_with(name, width, height, fps, bitrate, Pixel::NV12, latency_options(name))
@@ -306,10 +440,6 @@ fn latency_options(name: &str) -> ffmpeg::Dictionary<'_> {
         "h264_amf" => {
             options.set("usage", "ultralowlatency");
             options.set("quality", "speed");
-        }
-        "h264_qsv" => {
-            options.set("low_delay_brc", "1");
-            options.set("async_depth", "1");
         }
         "h264_mf" => {
             options.set("low_latency", "1");

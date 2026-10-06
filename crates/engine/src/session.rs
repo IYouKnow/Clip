@@ -2,7 +2,8 @@
 //! that owns the FFmpeg encoder and the replay buffer.
 //!
 //! All FFmpeg objects stay on the worker thread; the only things crossing
-//! threads are raw frame bytes, commands, and resulting paths.
+//! threads are frames (raw bytes, GPU frames, or downloaded NV12 frames),
+//! commands, and resulting paths.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -12,24 +13,35 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Result};
 use crossbeam_channel::{bounded, select, Receiver, Sender};
 
-use crate::capture::{self, CaptureHandle, CapturedFrame};
-use crate::encode::VideoEncoder;
+use crate::capture::{
+    self, CaptureHandle, CaptureMessage, CapturePath, CapturedData,
+};
+use crate::encode::{PipelineKind, VideoEncoder};
+use crate::hw;
 use crate::mux;
 use crate::ring::PacketRing;
 
-/// Live counters shared between the worker and the UI.
+/// Live counters shared between the worker, the capture thread and the UI.
 #[derive(Default)]
 pub struct SessionStats {
     encoder: Mutex<Option<String>>,
+    pipeline: Mutex<Option<PipelineKind>>,
     frames: AtomicU64,
     packets: AtomicU64,
     dropped: AtomicU64,
+    /// Frames the compositor reported as unchanged (and so cost nothing).
+    idle: AtomicU64,
 }
 
 impl SessionStats {
     /// Name of the encoder the worker actually opened, once known.
     pub fn encoder(&self) -> Option<String> {
         self.encoder.lock().ok().and_then(|value| value.clone())
+    }
+
+    /// Which pipeline is in use, once the encoder is open.
+    pub fn pipeline(&self) -> Option<PipelineKind> {
+        self.pipeline.lock().ok().and_then(|value| *value)
     }
 
     /// Frames received from capture.
@@ -42,15 +54,30 @@ impl SessionStats {
         self.packets.load(Ordering::Relaxed)
     }
 
-    /// Frames discarded because the encoder was behind. Older frames are
-    /// dropped so the buffer keeps the most recent video.
+    /// Frames discarded because the encoder was behind.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    fn set_encoder(&self, name: &str) {
+    /// Frames skipped because the screen had not changed.
+    pub fn idle(&self) -> u64 {
+        self.idle.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_dropped(&self) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_idle(&self) {
+        self.idle.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn set_encoder(&self, name: &str, kind: PipelineKind) {
         if let Ok(mut value) = self.encoder.lock() {
             *value = Some(name.to_string());
+        }
+        if let Ok(mut value) = self.pipeline.lock() {
+            *value = Some(kind);
         }
     }
 }
@@ -106,23 +133,32 @@ pub struct ReplaySession {
 impl ReplaySession {
     /// Starts capturing the primary monitor and filling the replay buffer.
     pub fn start(config: ReplayConfig, clips_dir: PathBuf) -> Result<Self> {
-        let (frame_tx, frame_rx) = crossbeam_channel::unbounded();
-        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        // Bounded: if the encoder ever falls behind, frames are dropped rather
+        // than piling up in memory.
+        let (frame_tx, frame_rx) = bounded::<CaptureMessage>(4);
+        let (command_tx, command_rx) = bounded::<Command>(4);
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(SessionStats::default());
 
         let worker_dir = clips_dir.clone();
         let worker_stats = stats.clone();
         let fps = config.fps;
+        let bitrate = config.bitrate;
         let worker = std::thread::Builder::new()
             .name("clipper23-encoder".into())
             .spawn(move || {
+                hw::set_current_thread_below_normal();
                 if let Err(error) = run(frame_rx, command_rx, config, worker_dir, worker_stats) {
                     eprintln!("encoder worker stopped: {error:#}");
                 }
             })?;
 
-        let capture = capture::start_monitor_capture(frame_tx, stop.clone(), fps)?;
+        let capture = capture::start_monitor_capture(
+            frame_tx,
+            stop.clone(),
+            capture::CaptureConfig { fps, bitrate },
+            stats.clone(),
+        )?;
 
         Ok(Self {
             commands: command_tx,
@@ -151,12 +187,7 @@ impl ReplaySession {
     }
 
     /// Ends the session: flushes the encoder, writes a final clip, and returns it.
-    ///
-    /// Unlike [`save`](Self::save) this captures everything, including frames
-    /// the encoder was still buffering.
     pub fn finish(mut self, seconds: f64) -> Result<PathBuf> {
-        // The worker exits when the frame channel closes, so the finish command
-        // has to be sent (and served) before capture is torn down.
         let (reply, result) = bounded(1);
         self.commands
             .send(Command::Finish { seconds, reply })
@@ -204,7 +235,7 @@ impl Drop for ReplaySession {
 
 /// Encoder worker: consumes frames, fills the ring, and serves commands.
 fn run(
-    frames: Receiver<CapturedFrame>,
+    frames: Receiver<CaptureMessage>,
     commands: Receiver<Command>,
     config: ReplayConfig,
     clips_dir: PathBuf,
@@ -216,35 +247,41 @@ fn run(
     loop {
         select! {
             recv(frames) -> message => match message {
-                Ok(mut frame) => {
-                    // Keep only the newest frame: if the encoder fell behind,
-                    // encoding stale frames would grow latency and memory.
-                    let mut dropped = 0u64;
-                    while let Ok(newer) = frames.try_recv() {
-                        frame = newer;
-                        dropped += 1;
-                    }
-                    if dropped > 0 {
-                        stats.dropped.fetch_add(dropped, Ordering::Relaxed);
-                    }
-
-                    if encoder.is_none() {
-                        let opened = VideoEncoder::new(
-                            config.encoder.as_deref(),
-                            frame.width,
-                            frame.height,
-                            config.fps,
-                            config.bitrate,
-                        )?;
-                        stats.set_encoder(opened.name());
-                        ring = Some(PacketRing::new(opened.time_base(), config.buffer_seconds));
-                        encoder = Some(opened);
-                    }
-
+                Ok(CaptureMessage::Setup(setup)) => {
+                    let (hw_frames, nv12_input) = match setup.path {
+                        CapturePath::ZeroCopy => (setup.hw_frames.clone(), true),
+                        CapturePath::GpuDownload => (None, true),
+                        CapturePath::CpuFallback => (None, false),
+                    };
+                    let opened = VideoEncoder::new_with_hw(
+                        config.encoder.as_deref(),
+                        setup.width,
+                        setup.height,
+                        config.fps,
+                        config.bitrate,
+                        hw_frames,
+                        nv12_input,
+                    )?;
+                    stats.set_encoder(opened.name(), opened.kind());
+                    ring = Some(PacketRing::new(opened.time_base(), config.buffer_seconds));
+                    encoder = Some(opened);
+                }
+                Ok(CaptureMessage::Frame(frame)) => {
+                    let Some(encoder) = encoder.as_mut() else { continue };
                     stats.frames.fetch_add(1, Ordering::Relaxed);
-                    let encoder = encoder.as_mut().unwrap();
-                    let packets =
-                        encoder.encode_bgra(&frame.data, frame.pitch, frame.timestamp_micros)?;
+
+                    let packets = match frame.data {
+                        CapturedData::Hw(hw_frame) => {
+                            encoder.encode_av_frame(hw_frame.into_raw(), frame.timestamp_micros)?
+                        }
+                        CapturedData::Nv12(nv12) => {
+                            encoder.encode_av_frame(nv12.into_raw(), frame.timestamp_micros)?
+                        }
+                        CapturedData::Bgra { data, pitch } => {
+                            encoder.encode_bgra(&data, pitch, frame.timestamp_micros)?
+                        }
+                    };
+
                     for packet in packets {
                         ring.as_mut().unwrap().push(packet);
                         stats.packets.fetch_add(1, Ordering::Relaxed);
@@ -274,11 +311,7 @@ fn run(
     Ok(())
 }
 
-fn flush(
-    encoder: &mut Option<VideoEncoder>,
-    ring: &mut Option<PacketRing>,
-    stats: &SessionStats,
-) {
+fn flush(encoder: &mut Option<VideoEncoder>, ring: &mut Option<PacketRing>, stats: &SessionStats) {
     if let (Some(encoder), Some(ring)) = (encoder.as_mut(), ring.as_mut()) {
         if let Ok(packets) = encoder.flush() {
             for packet in packets {

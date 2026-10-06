@@ -7,7 +7,7 @@ type Props = {
 };
 
 /// Encoders that typically run on the CPU rather than a GPU block.
-const SOFTWARE_ENCODERS = ["h264_mf", "libx264"];
+const SOFTWARE_ENCODERS = ["h264_mf", "libopenh264"];
 
 export default function Home({ status, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
@@ -80,6 +80,10 @@ export default function Home({ status, onChanged }: Props) {
             <dd>{status?.encoder ?? (replaying ? "starting…" : "—")}</dd>
           </div>
           <div>
+            <dt>Pipeline</dt>
+            <dd>{status?.pipeline ?? (replaying ? "starting…" : "—")}</dd>
+          </div>
+          <div>
             <dt>Frames captured</dt>
             <dd>{status?.frames ?? 0}</dd>
           </div>
@@ -92,12 +96,22 @@ export default function Home({ status, onChanged }: Props) {
             <dd>{status?.dropped ?? 0}</dd>
           </div>
           <div>
+            <dt>Idle (no change)</dt>
+            <dd>{status?.idle ?? 0}</dd>
+          </div>
+          <div>
             <dt>Capture</dt>
             <dd>
               {status ? `${status.fps} fps · ${(status.bitrate / 1_000_000).toFixed(0)} Mbps` : "—"}
             </dd>
           </div>
         </dl>
+        {status?.pipeline === "zero-copy gpu" && (
+          <p className="muted small">
+            Zero-copy GPU pipeline: captured frames stay on the GPU all the way to the
+            encoder, so nothing full-frame crosses the CPU.
+          </p>
+        )}
         {status && <p className="muted small">Clips are saved to {status.clips_dir}</p>}
       </section>
 

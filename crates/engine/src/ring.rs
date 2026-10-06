@@ -4,6 +4,7 @@
 //! remuxing (no re-encode). Video is the only thing buffered as packets: raw
 //! frames are far too large to keep in memory.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 
 use ffmpeg_next as ffmpeg;
@@ -17,7 +18,7 @@ fn seconds_of(packet: &Packet, time_base: ffmpeg::Rational) -> f64 {
 
 /// A bounded queue of encoded packets, trimmed by duration.
 pub struct PacketRing {
-    packets: Vec<Packet>,
+    packets: VecDeque<Packet>,
     time_base: ffmpeg::Rational,
     max_seconds: f64,
 }
@@ -25,14 +26,14 @@ pub struct PacketRing {
 impl PacketRing {
     pub fn new(time_base: ffmpeg::Rational, max_seconds: f64) -> Self {
         Self {
-            packets: Vec::new(),
+            packets: VecDeque::new(),
             time_base,
             max_seconds,
         }
     }
 
     pub fn push(&mut self, packet: Packet) {
-        self.packets.push(packet);
+        self.packets.push_back(packet);
         self.trim();
     }
 
@@ -51,7 +52,7 @@ impl PacketRing {
 
     /// Drops packets older than `max_seconds` relative to the newest packet.
     fn trim(&mut self) {
-        let Some(newest) = self.packets.last() else {
+        let Some(newest) = self.packets.back() else {
             return;
         };
         let end = seconds_of(newest, self.time_base);
@@ -59,7 +60,7 @@ impl PacketRing {
         while self.packets.len() > 1 {
             let oldest = seconds_of(&self.packets[0], self.time_base);
             if end - oldest > self.max_seconds {
-                self.packets.remove(0);
+                self.packets.pop_front();
             } else {
                 break;
             }
@@ -72,7 +73,7 @@ impl PacketRing {
             return 0..0;
         }
 
-        let end = seconds_of(self.packets.last().unwrap(), self.time_base);
+        let end = seconds_of(self.packets.back().unwrap(), self.time_base);
         let cutoff = end - seconds;
 
         // Last packet at or before the cutoff, then the next keyframe at or
@@ -101,7 +102,9 @@ impl PacketRing {
         start..self.packets.len()
     }
 
+    /// A contiguous mutable slice of the requested packet range.
     pub fn slice_mut(&mut self, range: Range<usize>) -> &mut [Packet] {
-        &mut self.packets[range]
+        let packets = self.packets.make_contiguous();
+        &mut packets[range]
     }
 }
