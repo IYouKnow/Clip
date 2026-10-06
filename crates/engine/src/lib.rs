@@ -3,6 +3,7 @@
 //! Modules are added as the pipeline is built:
 //! `capture` -> `convert` -> `encode` -> `ring` (+ `audio`) -> `mux` -> `session`.
 
+pub mod audio;
 pub mod capture;
 pub mod encode;
 pub mod mux;

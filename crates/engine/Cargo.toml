@@ -18,3 +18,4 @@ crossbeam-channel.workspace = true
 tracing.workspace = true
 windows-capture = "2.0.1"
 ffmpeg-next = "9"
+wasapi = "0.25"
