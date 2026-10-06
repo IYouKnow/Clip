@@ -1,34 +1,68 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useState } from "react";
+import { api, type Status } from "./lib/api";
+import Home from "./views/Home";
+import Library from "./views/Library";
+import SettingsView from "./views/Settings";
 import "./App.css";
 
-type EngineStatus = {
-  replaying: boolean;
-  encoder: string | null;
-  buffer_seconds: number;
-};
+type Tab = "home" | "library" | "settings";
 
-function App() {
-  const [status, setStatus] = useState<EngineStatus | null>(null);
+const TABS: { id: Tab; label: string }[] = [
+  { id: "home", label: "Replay" },
+  { id: "library", label: "Library" },
+  { id: "settings", label: "Settings" },
+];
 
-  useEffect(() => {
-    invoke<EngineStatus>("get_status").then(setStatus).catch(console.error);
+export default function App() {
+  const [tab, setTab] = useState<Tab>("home");
+  const [status, setStatus] = useState<Status | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await api.getStatus());
+      setError(null);
+    } catch (caught) {
+      setError(String(caught));
+    }
   }, []);
 
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const timer = setInterval(refresh, 1000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
   return (
-    <main className="container">
-      <h1>Clipper23</h1>
-      <p>Clip anything on your screen. Engine not wired up yet.</p>
-      <dl>
-        <dt>Replaying</dt>
-        <dd>{status ? String(status.replaying) : "…"}</dd>
-        <dt>Encoder</dt>
-        <dd>{status?.encoder ?? "none"}</dd>
-        <dt>Buffer</dt>
-        <dd>{status ? `${status.buffer_seconds}s` : "…"}</dd>
-      </dl>
-    </main>
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-dot" data-on={status?.replaying ?? false} />
+          Clipper23
+        </div>
+        <nav className="tabs">
+          {TABS.map((entry) => (
+            <button
+              key={entry.id}
+              className={tab === entry.id ? "tab active" : "tab"}
+              onClick={() => setTab(entry.id)}
+            >
+              {entry.label}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      {error && <div className="banner error">{error}</div>}
+
+      <main className="content">
+        {tab === "home" && <Home status={status} onChanged={refresh} />}
+        {tab === "library" && <Library />}
+        {tab === "settings" && <SettingsView status={status} onSaved={refresh} />}
+      </main>
+    </div>
   );
 }
-
-export default App;

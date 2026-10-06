@@ -5,8 +5,8 @@
 //! threads are raw frame bytes, commands, and resulting paths.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Result};
@@ -16,6 +16,37 @@ use crate::capture::{self, CaptureHandle, CapturedFrame};
 use crate::encode::VideoEncoder;
 use crate::mux;
 use crate::ring::PacketRing;
+
+/// Live counters shared between the worker and the UI.
+#[derive(Default)]
+pub struct SessionStats {
+    encoder: Mutex<Option<String>>,
+    frames: AtomicU64,
+    packets: AtomicU64,
+}
+
+impl SessionStats {
+    /// Name of the encoder the worker actually opened, once known.
+    pub fn encoder(&self) -> Option<String> {
+        self.encoder.lock().ok().and_then(|value| value.clone())
+    }
+
+    /// Frames received from capture.
+    pub fn frames(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
+    }
+
+    /// Encoded packets currently held for a future clip.
+    pub fn packets(&self) -> u64 {
+        self.packets.load(Ordering::Relaxed)
+    }
+
+    fn set_encoder(&self, name: &str) {
+        if let Ok(mut value) = self.encoder.lock() {
+            *value = Some(name.to_string());
+        }
+    }
+}
 
 /// How the replay buffer should be encoded.
 #[derive(Debug, Clone)]
@@ -62,6 +93,7 @@ pub struct ReplaySession {
     stop: Arc<AtomicBool>,
     capture: Option<CaptureHandle>,
     worker: Option<std::thread::JoinHandle<()>>,
+    stats: Arc<SessionStats>,
 }
 
 impl ReplaySession {
@@ -70,12 +102,14 @@ impl ReplaySession {
         let (frame_tx, frame_rx) = crossbeam_channel::unbounded();
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let stop = Arc::new(AtomicBool::new(false));
+        let stats = Arc::new(SessionStats::default());
 
         let worker_dir = clips_dir.clone();
+        let worker_stats = stats.clone();
         let worker = std::thread::Builder::new()
             .name("clipper23-encoder".into())
             .spawn(move || {
-                if let Err(error) = run(frame_rx, command_rx, config, worker_dir) {
+                if let Err(error) = run(frame_rx, command_rx, config, worker_dir, worker_stats) {
                     eprintln!("encoder worker stopped: {error:#}");
                 }
             })?;
@@ -87,7 +121,13 @@ impl ReplaySession {
             stop,
             capture: Some(capture),
             worker: Some(worker),
+            stats,
         })
+    }
+
+    /// Live counters for status reporting.
+    pub fn stats(&self) -> Arc<SessionStats> {
+        self.stats.clone()
     }
 
     /// Writes the last `seconds` of buffered video to a new clip and returns its path.
@@ -160,16 +200,15 @@ fn run(
     commands: Receiver<Command>,
     config: ReplayConfig,
     clips_dir: PathBuf,
+    stats: Arc<SessionStats>,
 ) -> Result<()> {
     let mut encoder: Option<VideoEncoder> = None;
     let mut ring: Option<PacketRing> = None;
-    let mut frames_seen: u64 = 0;
 
     loop {
         select! {
             recv(frames) -> message => match message {
                 Ok(frame) => {
-                    frames_seen += 1;
                     if encoder.is_none() {
                         let opened = VideoEncoder::new(
                             config.encoder.as_deref(),
@@ -178,13 +217,16 @@ fn run(
                             config.fps,
                             config.bitrate,
                         )?;
+                        stats.set_encoder(opened.name());
                         ring = Some(PacketRing::new(opened.time_base(), config.buffer_seconds));
                         encoder = Some(opened);
                     }
 
+                    stats.frames.fetch_add(1, Ordering::Relaxed);
                     let encoder = encoder.as_mut().unwrap();
                     for packet in encoder.encode_bgra(&frame.data, frame.timestamp_micros)? {
                         ring.as_mut().unwrap().push(packet);
+                        stats.packets.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Err(_) => break,
@@ -194,14 +236,12 @@ fn run(
                     let _ = reply.send(save(&mut encoder, &mut ring, &clips_dir, seconds));
                 }
                 Ok(Command::Finish { seconds, reply }) => {
-                    flush(&mut encoder, &mut ring);
-                    let buffered = ring.as_ref().map(PacketRing::len).unwrap_or(0);
-                    eprintln!("worker: {frames_seen} frames captured, {buffered} packets buffered");
+                    flush(&mut encoder, &mut ring, &stats);
                     let _ = reply.send(save(&mut encoder, &mut ring, &clips_dir, seconds));
                     break;
                 }
                 Ok(Command::Stop { reply }) => {
-                    flush(&mut encoder, &mut ring);
+                    flush(&mut encoder, &mut ring, &stats);
                     let _ = reply.send(Ok(()));
                     break;
                 }
@@ -213,11 +253,16 @@ fn run(
     Ok(())
 }
 
-fn flush(encoder: &mut Option<VideoEncoder>, ring: &mut Option<PacketRing>) {
+fn flush(
+    encoder: &mut Option<VideoEncoder>,
+    ring: &mut Option<PacketRing>,
+    stats: &SessionStats,
+) {
     if let (Some(encoder), Some(ring)) = (encoder.as_mut(), ring.as_mut()) {
         if let Ok(packets) = encoder.flush() {
             for packet in packets {
                 ring.push(packet);
+                stats.packets.fetch_add(1, Ordering::Relaxed);
             }
         }
     }

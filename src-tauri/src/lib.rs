@@ -1,17 +1,225 @@
-use clipper23_engine::EngineStatus;
+//! Tauri shell: exposes the replay engine and clip library to the UI.
 
-/// Returns the current engine status. Wired to the real engine as the
-/// capture/encode pipeline comes online.
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use clipper23_engine::encode;
+use clipper23_engine::session::{ReplayConfig, ReplaySession, SessionStats};
+use clipper23_library::{self as library, ClipSummary};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_opener::OpenerExt;
+
+/// Folder name under the user's Videos directory.
+const CLIPS_FOLDER: &str = "Clipper23";
+
+/// User-configurable options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Settings {
+    /// Seconds of video kept in the replay buffer.
+    buffer_seconds: u32,
+    fps: u32,
+    bitrate: u64,
+    /// Preferred encoder, or `None` to auto-select.
+    encoder: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            buffer_seconds: 60,
+            fps: 60,
+            bitrate: 20_000_000,
+            encoder: None,
+        }
+    }
+}
+
+/// Everything the UI needs to render the home screen.
+#[derive(Debug, Clone, Serialize)]
+struct Status {
+    replaying: bool,
+    encoder: Option<String>,
+    frames: u64,
+    packets: u64,
+    buffer_seconds: u32,
+    fps: u32,
+    bitrate: u64,
+    clips_dir: String,
+    available_encoders: Vec<String>,
+}
+
+struct AppState {
+    session: Mutex<Option<ReplaySession>>,
+    stats: Mutex<Option<Arc<SessionStats>>>,
+    settings: Mutex<Settings>,
+}
+
+fn clips_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .video_dir()
+        .map_err(|error| error.to_string())?
+        .join(CLIPS_FOLDER);
+    library::ensure_dir(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+fn status_from(settings: &Settings, stats: Option<&SessionStats>, app: &AppHandle) -> Status {
+    Status {
+        replaying: stats.is_some(),
+        encoder: stats.and_then(SessionStats::encoder),
+        frames: stats.map(SessionStats::frames).unwrap_or(0),
+        packets: stats.map(SessionStats::packets).unwrap_or(0),
+        buffer_seconds: settings.buffer_seconds,
+        fps: settings.fps,
+        bitrate: settings.bitrate,
+        clips_dir: clips_dir(app)
+            .map(|dir| dir.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        available_encoders: encode::h264_encoders()
+            .into_iter()
+            .filter(|info| info.available)
+            .map(|info| info.name)
+            .collect(),
+    }
+}
+
 #[tauri::command]
-fn get_status() -> EngineStatus {
-    EngineStatus::default()
+fn get_settings(state: State<'_, AppState>) -> Settings {
+    state
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn set_settings(state: State<'_, AppState>, settings: Settings) {
+    if let Ok(mut current) = state.settings.lock() {
+        *current = settings;
+    }
+}
+
+#[tauri::command]
+fn get_status(state: State<'_, AppState>, app: AppHandle) -> Status {
+    let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
+    let stats = state.stats.lock().ok().and_then(|s| s.clone());
+    status_from(&settings, stats.as_deref(), &app)
+}
+
+#[tauri::command]
+fn start_replay(state: State<'_, AppState>, app: AppHandle) -> Result<Status, String> {
+    let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
+
+    let mut session = state.session.lock().map_err(|error| error.to_string())?;
+    if let Some(existing) = session.as_ref() {
+        let stats = existing.stats();
+        return Ok(status_from(&settings, Some(&stats), &app));
+    }
+
+    let dir = clips_dir(&app)?;
+    let config = ReplayConfig {
+        encoder: settings.encoder.clone(),
+        fps: settings.fps,
+        bitrate: settings.bitrate,
+        buffer_seconds: settings.buffer_seconds as f64,
+    };
+
+    let started = ReplaySession::start(config, dir).map_err(|error| error.to_string())?;
+    let stats = started.stats();
+    *session = Some(started);
+    if let Ok(mut current) = state.stats.lock() {
+        *current = Some(stats.clone());
+    }
+
+    Ok(status_from(&settings, Some(&stats), &app))
+}
+
+#[tauri::command]
+fn stop_replay(state: State<'_, AppState>, app: AppHandle) -> Result<Status, String> {
+    let taken = state
+        .session
+        .lock()
+        .map_err(|error| error.to_string())?
+        .take();
+    if let Some(session) = taken {
+        session.stop().map_err(|error| error.to_string())?;
+    }
+    if let Ok(mut current) = state.stats.lock() {
+        *current = None;
+    }
+
+    let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
+    Ok(status_from(&settings, None, &app))
+}
+
+#[tauri::command]
+fn save_clip(state: State<'_, AppState>, app: AppHandle) -> Result<ClipSummary, String> {
+    let seconds = state
+        .settings
+        .lock()
+        .map(|settings| settings.buffer_seconds)
+        .unwrap_or(60);
+
+    let session = state.session.lock().map_err(|error| error.to_string())?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "replay is not running".to_string())?;
+
+    let path = session
+        .save(seconds as f64)
+        .map_err(|error| error.to_string())?;
+    let _ = app;
+    library::summary(&path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_clips(app: AppHandle) -> Result<Vec<ClipSummary>, String> {
+    let dir = clips_dir(&app)?;
+    library::scan(&dir).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_clip(path: String) -> Result<(), String> {
+    library::delete(Path::new(&path)).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_clip(app: AppHandle, path: String) -> Result<(), String> {
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn reveal_clip(app: AppHandle, path: String) -> Result<(), String> {
+    app.opener()
+        .reveal_item_in_dir(path)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_status])
+        .manage(AppState {
+            session: Mutex::new(None),
+            stats: Mutex::new(None),
+            settings: Mutex::new(Settings::default()),
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_settings,
+            set_settings,
+            get_status,
+            start_replay,
+            stop_replay,
+            save_clip,
+            list_clips,
+            delete_clip,
+            open_clip,
+            reveal_clip,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

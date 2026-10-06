@@ -1,0 +1,61 @@
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+
+export type Status = {
+  replaying: boolean;
+  encoder: string | null;
+  frames: number;
+  packets: number;
+  buffer_seconds: number;
+  fps: number;
+  bitrate: number;
+  clips_dir: string;
+  available_encoders: string[];
+};
+
+export type Clip = {
+  path: string;
+  name: string;
+  size_bytes: number;
+  modified_ms: number;
+};
+
+export type Settings = {
+  buffer_seconds: number;
+  fps: number;
+  bitrate: number;
+  encoder: string | null;
+};
+
+export const api = {
+  getStatus: () => invoke<Status>("get_status"),
+  startReplay: () => invoke<Status>("start_replay"),
+  stopReplay: () => invoke<Status>("stop_replay"),
+  saveClip: () => invoke<Clip>("save_clip"),
+
+  listClips: () => invoke<Clip[]>("list_clips"),
+  deleteClip: (path: string) => invoke<void>("delete_clip", { path }),
+  openClip: (path: string) => invoke<void>("open_clip", { path }),
+  revealClip: (path: string) => invoke<void>("reveal_clip", { path }),
+
+  getSettings: () => invoke<Settings>("get_settings"),
+  setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
+};
+
+/// Turns an absolute path into a URL the webview can load.
+export const assetUrl = (path: string) => convertFileSrc(path);
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+export function formatDate(ms: number): string {
+  if (!ms) return "";
+  return new Date(ms).toLocaleString();
+}
+
+export function formatMbps(bits: number): string {
+  return `${(bits / 1_000_000).toFixed(0)} Mbps`;
+}
