@@ -1,0 +1,20 @@
+[package]
+name = "clipper23-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Capture, hardware encode, replay buffer and clip saving for clipper23"
+
+[lib]
+name = "clipper23_engine"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+windows-capture = "2.0.1"
+ffmpeg-next = "9"

@@ -1,0 +1,27 @@
+[package]
+name = "clipper23"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clipper23 desktop clipping app"
+authors.workspace = true
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name on Windows.
+# https://github.com/rust-lang/cargo/issues/8519
+name = "clipper23_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+clipper23-engine = { path = "../crates/engine" }
+clipper23-library = { path = "../crates/library" }

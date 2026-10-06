@@ -1,0 +1,8 @@
+# FFmpeg is vendored by scripts/fetch-ffmpeg.ps1 into third_party/ffmpeg.
+# ffmpeg-sys-next looks for the prefix in FFMPEG_DIR. `relative = true` resolves
+# the value against the parent of this .cargo directory, so the build receives
+# an absolute path.
+[env]
+FFMPEG_DIR = { value = "third_party/ffmpeg", relative = true }
+# bindgen needs libclang; scripts/fetch-libclang.ps1 vendors it here.
+LIBCLANG_PATH = { value = "third_party/libclang", relative = true }
