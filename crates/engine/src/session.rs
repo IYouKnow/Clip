@@ -1,0 +1,257 @@
+//! Ties capture to the encoder: a capture thread forwards frames to a worker
+//! that owns the FFmpeg encoder and the replay buffer.
+//!
+//! All FFmpeg objects stay on the worker thread; the only things crossing
+//! threads are raw frame bytes, commands, and resulting paths.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, bail, Result};
+use crossbeam_channel::{bounded, select, Receiver, Sender};
+
+use crate::capture::{self, CaptureHandle, CapturedFrame};
+use crate::encode::VideoEncoder;
+use crate::mux;
+use crate::ring::PacketRing;
+
+/// How the replay buffer should be encoded.
+#[derive(Debug, Clone)]
+pub struct ReplayConfig {
+    /// Encoder name, or `None` to pick the best available.
+    pub encoder: Option<String>,
+    pub fps: u32,
+    pub bitrate: u64,
+    /// How many seconds of encoded video to retain.
+    pub buffer_seconds: f64,
+}
+
+impl Default for ReplayConfig {
+    fn default() -> Self {
+        Self {
+            encoder: None,
+            fps: 60,
+            bitrate: 20_000_000,
+            buffer_seconds: 60.0,
+        }
+    }
+}
+
+/// Commands accepted by the encoder worker.
+enum Command {
+    Save {
+        seconds: f64,
+        reply: Sender<Result<PathBuf>>,
+    },
+    /// Flush the encoder, write a final clip, then shut down. Used when the
+    /// session is ending (and by headless runs).
+    Finish {
+        seconds: f64,
+        reply: Sender<Result<PathBuf>>,
+    },
+    Stop {
+        reply: Sender<Result<()>>,
+    },
+}
+
+/// A running replay session.
+pub struct ReplaySession {
+    commands: Sender<Command>,
+    stop: Arc<AtomicBool>,
+    capture: Option<CaptureHandle>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ReplaySession {
+    /// Starts capturing the primary monitor and filling the replay buffer.
+    pub fn start(config: ReplayConfig, clips_dir: PathBuf) -> Result<Self> {
+        let (frame_tx, frame_rx) = crossbeam_channel::unbounded();
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let worker_dir = clips_dir.clone();
+        let worker = std::thread::Builder::new()
+            .name("clipper23-encoder".into())
+            .spawn(move || {
+                if let Err(error) = run(frame_rx, command_rx, config, worker_dir) {
+                    eprintln!("encoder worker stopped: {error:#}");
+                }
+            })?;
+
+        let capture = capture::start_monitor_capture(frame_tx, stop.clone())?;
+
+        Ok(Self {
+            commands: command_tx,
+            stop,
+            capture: Some(capture),
+            worker: Some(worker),
+        })
+    }
+
+    /// Writes the last `seconds` of buffered video to a new clip and returns its path.
+    ///
+    /// Non-destructive: recording continues afterwards. Because the encoder is
+    /// not flushed, packets it is still holding are not included.
+    pub fn save(&self, seconds: f64) -> Result<PathBuf> {
+        let (reply, result) = bounded(1);
+        self.commands
+            .send(Command::Save { seconds, reply })
+            .map_err(|_| anyhow!("replay session is not running"))?;
+        result.recv()?
+    }
+
+    /// Ends the session: flushes the encoder, writes a final clip, and returns it.
+    ///
+    /// Unlike [`save`](Self::save) this captures everything, including frames
+    /// the encoder was still buffering.
+    pub fn finish(mut self, seconds: f64) -> Result<PathBuf> {
+        // The worker exits when the frame channel closes, so the finish command
+        // has to be sent (and served) before capture is torn down.
+        let (reply, result) = bounded(1);
+        self.commands
+            .send(Command::Finish { seconds, reply })
+            .map_err(|_| anyhow!("replay session is not running"))?;
+        let clip = result.recv()?;
+
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(capture) = self.capture.take() {
+            let _ = capture.stop();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        clip
+    }
+
+    /// Stops capture and shuts the encoder down.
+    pub fn stop(mut self) -> Result<()> {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(capture) = self.capture.take() {
+            let _ = capture.stop();
+        }
+
+        let (reply, result) = bounded(1);
+        if self.commands.send(Command::Stop { reply }).is_ok() {
+            let _ = result.recv();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ReplaySession {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(capture) = self.capture.take() {
+            let _ = capture.stop();
+        }
+        let (reply, _result) = bounded(1);
+        let _ = self.commands.send(Command::Stop { reply });
+    }
+}
+
+/// Encoder worker: consumes frames, fills the ring, and serves commands.
+fn run(
+    frames: Receiver<CapturedFrame>,
+    commands: Receiver<Command>,
+    config: ReplayConfig,
+    clips_dir: PathBuf,
+) -> Result<()> {
+    let mut encoder: Option<VideoEncoder> = None;
+    let mut ring: Option<PacketRing> = None;
+    let mut frames_seen: u64 = 0;
+
+    loop {
+        select! {
+            recv(frames) -> message => match message {
+                Ok(frame) => {
+                    frames_seen += 1;
+                    if encoder.is_none() {
+                        let opened = VideoEncoder::new(
+                            config.encoder.as_deref(),
+                            frame.width,
+                            frame.height,
+                            config.fps,
+                            config.bitrate,
+                        )?;
+                        ring = Some(PacketRing::new(opened.time_base(), config.buffer_seconds));
+                        encoder = Some(opened);
+                    }
+
+                    let encoder = encoder.as_mut().unwrap();
+                    for packet in encoder.encode_bgra(&frame.data, frame.timestamp_micros)? {
+                        ring.as_mut().unwrap().push(packet);
+                    }
+                }
+                Err(_) => break,
+            },
+            recv(commands) -> message => match message {
+                Ok(Command::Save { seconds, reply }) => {
+                    let _ = reply.send(save(&mut encoder, &mut ring, &clips_dir, seconds));
+                }
+                Ok(Command::Finish { seconds, reply }) => {
+                    flush(&mut encoder, &mut ring);
+                    let buffered = ring.as_ref().map(PacketRing::len).unwrap_or(0);
+                    eprintln!("worker: {frames_seen} frames captured, {buffered} packets buffered");
+                    let _ = reply.send(save(&mut encoder, &mut ring, &clips_dir, seconds));
+                    break;
+                }
+                Ok(Command::Stop { reply }) => {
+                    flush(&mut encoder, &mut ring);
+                    let _ = reply.send(Ok(()));
+                    break;
+                }
+                Err(_) => break,
+            },
+        }
+    }
+
+    Ok(())
+}
+
+fn flush(encoder: &mut Option<VideoEncoder>, ring: &mut Option<PacketRing>) {
+    if let (Some(encoder), Some(ring)) = (encoder.as_mut(), ring.as_mut()) {
+        if let Ok(packets) = encoder.flush() {
+            for packet in packets {
+                ring.push(packet);
+            }
+        }
+    }
+}
+
+fn save(
+    encoder: &mut Option<VideoEncoder>,
+    ring: &mut Option<PacketRing>,
+    clips_dir: &Path,
+    seconds: f64,
+) -> Result<PathBuf> {
+    let (Some(encoder), Some(ring)) = (encoder.as_mut(), ring.as_mut()) else {
+        bail!("no frames captured yet");
+    };
+
+    // Note: the encoder is deliberately not flushed here — sending EOF would
+    // end the stream and stop further recording. A few in-flight packets may
+    // not be in the buffer yet, which is fine for a replay buffer.
+    let range = ring.snapshot_range(seconds);
+    if range.is_empty() {
+        bail!("replay buffer is empty");
+    }
+
+    std::fs::create_dir_all(clips_dir)?;
+    let path = clips_dir.join(format!("clip-{}.mp4", timestamp()));
+    let time_base = ring.time_base();
+    let packets = ring.slice_mut(range);
+    mux::write_mp4(&path, encoder.inner(), time_base, packets)?;
+    Ok(path)
+}
+
+fn timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}

@@ -5,6 +5,9 @@
 
 pub mod capture;
 pub mod encode;
+pub mod mux;
+pub mod ring;
+pub mod session;
 
 /// Current engine status, surfaced to the UI.
 #[derive(Debug, Clone, serde::Serialize)]
