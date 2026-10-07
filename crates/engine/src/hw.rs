@@ -87,34 +87,42 @@ impl HwFrames {
     /// Drivers differ in how many NV12 array slices they allow (some accept only
     /// one or two), so the largest working pool size at or below `pool` is used.
     pub fn new(device: &GpuDevice, width: u32, height: u32, pool: u32) -> Result<Self> {
-        let (texture, slices) = create_nv12_texture(device, width, height, pool)?;
-        Self::from_texture(device, texture, width, height, slices)
+        let (texture, slices) = create_texture(device, width, height, pool, DXGI_FORMAT_NV12)?;
+        Self::from_texture(
+            device,
+            texture,
+            width,
+            height,
+            slices,
+            ffi::AVPixelFormat::AV_PIX_FMT_NV12,
+        )
     }
 
-    /// Builds the hardware frame pool on an already-created NV12 array texture.
+    /// Builds the hardware frame pool on an already-created texture.
     ///
-    /// Letting the caller create and validate the texture (and the video
-    /// processor that writes into it) first keeps the FFmpeg context from being
-    /// built at all when the GPU path is unavailable.
+    /// Letting the caller create and validate the texture first keeps the FFmpeg
+    /// context from being built at all when the GPU path is unavailable.
     pub fn from_texture(
         device: &GpuDevice,
         texture: ID3D11Texture2D,
         width: u32,
         height: u32,
         slices: u32,
+        sw_format: ffi::AVPixelFormat,
     ) -> Result<Self> {
-        unsafe { Self::build(device, texture, width, height, slices) }
+        unsafe { Self::build(device, texture, width, height, slices, sw_format) }
     }
 }
 
-/// Creates an NV12 array texture, halving the array size until the driver accepts.
+/// Creates an array texture of `format`, halving the array size until the driver accepts.
 ///
 /// Returns the texture and the array size it was created with.
-pub fn create_nv12_texture(
+pub fn create_texture(
     device: &GpuDevice,
     width: u32,
     height: u32,
     pool: u32,
+    format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
 ) -> Result<(ID3D11Texture2D, u32)> {
     let mut array = pool.max(1);
     loop {
@@ -123,7 +131,7 @@ pub fn create_nv12_texture(
             Height: height,
             MipLevels: 1,
             ArraySize: array,
-            Format: DXGI_FORMAT_NV12,
+            Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -138,17 +146,27 @@ pub fn create_nv12_texture(
         match unsafe { device.device.CreateTexture2D(&desc, None, Some(&mut texture)) } {
             Ok(()) => {
                 let texture =
-                    texture.ok_or_else(|| anyhow!("D3D11 returned no NV12 texture"))?;
+                    texture.ok_or_else(|| anyhow!("D3D11 returned no texture"))?;
                 return Ok((texture, array));
             }
             Err(error) => {
                 if array <= 1 {
-                    return Err(anyhow!("CreateTexture2D(NV12) failed: {error}"));
+                    return Err(anyhow!("CreateTexture2D failed: {error}"));
                 }
                 array /= 2;
             }
         }
     }
+}
+
+/// Convenience wrapper: an NV12 array texture for the video-processor path.
+pub fn create_nv12_texture(
+    device: &GpuDevice,
+    width: u32,
+    height: u32,
+    pool: u32,
+) -> Result<(ID3D11Texture2D, u32)> {
+    create_texture(device, width, height, pool, DXGI_FORMAT_NV12)
 }
 
 impl HwFrames {
@@ -158,6 +176,7 @@ impl HwFrames {
         width: u32,
         height: u32,
         pool: u32,
+        sw_format: ffi::AVPixelFormat,
     ) -> Result<Self> {
         // 1) D3D11VA device context around the shared device.
         let device_ref = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA);
@@ -202,7 +221,7 @@ impl HwFrames {
         {
             let frames_ctx = (*frames_ref).data as *mut ffi::AVHWFramesContext;
             (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
-            (*frames_ctx).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
+            (*frames_ctx).sw_format = sw_format;
             (*frames_ctx).width = width as i32;
             (*frames_ctx).height = height as i32;
             (*frames_ctx).initial_pool_size = pool as i32;

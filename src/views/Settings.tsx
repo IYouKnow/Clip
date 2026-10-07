@@ -1,12 +1,23 @@
+import { FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ThemeToggle } from "../components/ThemeToggle";
+import { Banner } from "../components/ui/Banner";
+import { Button } from "../components/ui/Button";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Panel } from "../components/ui/Panel";
+import { Select } from "../components/ui/Select";
+import { Slider } from "../components/ui/Slider";
 import { api, type Settings, type Status } from "../lib/api";
+import type { Theme } from "../lib/theme";
 
 type Props = {
   status: Status | null;
+  theme: Theme;
+  onThemeChange: (theme: Theme) => void;
   onSaved: () => void;
 };
 
-export default function SettingsView({ status, onSaved }: Props) {
+export default function SettingsView({ status, theme, onThemeChange, onSaved }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -17,15 +28,6 @@ export default function SettingsView({ status, onSaved }: Props) {
       .then(setSettings)
       .catch((caught) => setError(String(caught)));
   }, []);
-
-  if (!settings) {
-    return (
-      <section className="card">
-        <h2>Settings</h2>
-        <p className="muted">{error ?? "Loading…"}</p>
-      </section>
-    );
-  }
 
   function update(patch: Partial<Settings>) {
     setSettings((current) => (current ? { ...current, ...patch } : current));
@@ -45,83 +47,93 @@ export default function SettingsView({ status, onSaved }: Props) {
   }
 
   const encoders = status?.available_encoders ?? [];
+  const clipsDir = status?.clips_dir;
 
   return (
-    <div className="stack">
-      <section className="card">
-        <h2>Capture</h2>
+    <>
+      <PageHeader title="Settings" description="Capture, appearance, and where clips land." />
 
-        <label className="field">
-          <span>Replay buffer length</span>
-          <div className="row">
-            <input
-              type="range"
-              min={10}
-              max={300}
-              step={5}
-              value={settings.buffer_seconds}
-              onChange={(event) => update({ buffer_seconds: Number(event.target.value) })}
-            />
-            <output>{settings.buffer_seconds}s</output>
+      <div className="flex max-w-2xl flex-col gap-4 p-6">
+        {error && <Banner tone="error">{error}</Banner>}
+
+        <Panel title="Capture">
+          {!settings ? (
+            <p className="text-[13px] text-ink-muted">Loading…</p>
+          ) : (
+            <div className="flex flex-col gap-5">
+              <Slider
+                label="Replay buffer length"
+                min={10}
+                max={300}
+                step={5}
+                value={settings.buffer_seconds}
+                onChange={(value) => update({ buffer_seconds: value })}
+                format={(value) => `${value}s`}
+              />
+              <Select
+                label="Frame rate"
+                value={String(settings.fps)}
+                onChange={(value) => update({ fps: Number(value) })}
+              >
+                <option value="30">30 fps</option>
+                <option value="60">60 fps</option>
+              </Select>
+              <Slider
+                label="Video bitrate"
+                min={5}
+                max={50}
+                step={1}
+                value={Math.round(settings.bitrate / 1_000_000)}
+                onChange={(value) => update({ bitrate: value * 1_000_000 })}
+                format={(value) => `${value} Mbps`}
+              />
+              <Select
+                label="Encoder"
+                value={settings.encoder ?? ""}
+                onChange={(value) => update({ encoder: value || null })}
+              >
+                <option value="">Auto (recommended)</option>
+                {encoders.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </Select>
+
+              <div className="flex items-center gap-3">
+                <Button variant="primary" onClick={save}>
+                  Save settings
+                </Button>
+                {saved && <span className="text-[13px] text-ink-muted">Saved</span>}
+              </div>
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Appearance">
+          <div className="flex flex-col gap-2">
+            <span className="text-[13px] text-ink-muted">Theme</span>
+            <div className="max-w-[220px]">
+              <ThemeToggle theme={theme} onChange={onThemeChange} />
+            </div>
+            <p className="text-[12px] text-ink-faint">System follows your Windows theme.</p>
           </div>
-        </label>
+        </Panel>
 
-        <label className="field">
-          <span>Frame rate</span>
-          <select
-            value={settings.fps}
-            onChange={(event) => update({ fps: Number(event.target.value) })}
-          >
-            <option value={30}>30 fps</option>
-            <option value={60}>60 fps</option>
-          </select>
-        </label>
-
-        <label className="field">
-          <span>Video bitrate</span>
-          <div className="row">
-            <input
-              type="range"
-              min={5}
-              max={50}
-              step={1}
-              value={Math.round(settings.bitrate / 1_000_000)}
-              onChange={(event) =>
-                update({ bitrate: Number(event.target.value) * 1_000_000 })
-              }
-            />
-            <output>{Math.round(settings.bitrate / 1_000_000)} Mbps</output>
+        <Panel title="Storage">
+          <div className="flex items-center justify-between gap-4">
+            <p className="break-all text-[13px] text-ink-muted">{clipsDir ?? "—"}</p>
+            <Button
+              size="sm"
+              disabled={!clipsDir}
+              icon={<FolderOpen className="size-3.5" />}
+              onClick={() => clipsDir && api.openClip(clipsDir)}
+            >
+              Open folder
+            </Button>
           </div>
-        </label>
-
-        <label className="field">
-          <span>Encoder</span>
-          <select
-            value={settings.encoder ?? ""}
-            onChange={(event) => update({ encoder: event.target.value || null })}
-          >
-            <option value="">Auto (recommended)</option>
-            {encoders.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div className="row">
-          <button className="btn primary" onClick={save}>
-            Save settings
-          </button>
-          {saved && <span className="muted">Saved</span>}
-        </div>
-        {error && <div className="banner error">{error}</div>}
-      </section>
-
-      <section className="card">
-        <h2>Storage</h2>
-        <p className="muted small">{status?.clips_dir ?? "—"}</p>
-      </section>
-    </div>
+        </Panel>
+      </div>
+    </>
   );
 }

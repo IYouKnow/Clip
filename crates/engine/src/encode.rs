@@ -115,15 +115,38 @@ pub fn pick_h264_encoder() -> Option<&'static str> {
 /// The opened encoder is dropped immediately; only success is reported.
 pub fn probe_zero_copy(hw: &HwFrames, width: u32, height: u32, fps: u32, bitrate: u64) -> bool {
     let _ = ffmpeg::init();
+    let _quiet = QuietLog::new();
     for name in H264_ENCODERS.iter().copied().filter(|n| is_zero_copy_encoder(n)) {
         if is_unusable(name) || ffmpeg_next::encoder::find_by_name(name).is_none() {
             continue;
         }
-        if open(name, width, height, fps, bitrate, Some(hw)).is_ok() {
+        if open(name, width, height, fps, bitrate, Some(hw), false).is_ok() {
             return true;
         }
     }
     false
+}
+
+/// Silences FFmpeg's logging while encoders are being probed/tried.
+///
+/// Encoder selection deliberately tries candidates that may fail on this
+/// machine (e.g. NVENC without a driver); those failures are expected and only
+/// noisy. The previous level is restored on drop.
+struct QuietLog(ffmpeg::util::log::level::Level);
+
+impl QuietLog {
+    fn new() -> Self {
+        let previous = ffmpeg::util::log::get_level()
+            .unwrap_or(ffmpeg::util::log::level::Level::Info);
+        ffmpeg::util::log::set_level(ffmpeg::util::log::level::Level::Quiet);
+        Self(previous)
+    }
+}
+
+impl Drop for QuietLog {
+    fn drop(&mut self) {
+        ffmpeg::util::log::set_level(self.0);
+    }
 }
 
 /// Encodes frames to H.264 packets.
@@ -180,6 +203,10 @@ impl VideoEncoder {
     ) -> Result<Self> {
         ffmpeg::init()?;
 
+        // Candidate encoders that are compiled in may still fail on this driver;
+        // keep those expected failures out of the console.
+        let _quiet = QuietLog::new();
+
         let mut candidates: Vec<&str> = Vec::new();
         if let Some(name) = preferred {
             candidates.push(name);
@@ -204,7 +231,7 @@ impl VideoEncoder {
                 None
             };
 
-            match open(name, width, height, fps, bitrate, use_hw) {
+            match open(name, width, height, fps, bitrate, use_hw, !nv12_input) {
                 Ok(encoder) => {
                     let kind = if use_hw.is_some() {
                         PipelineKind::ZeroCopyGpu
@@ -236,25 +263,31 @@ impl VideoEncoder {
         hw: Option<Arc<HwFrames>>,
     ) -> Result<Self> {
         let (scaler, scratch, out_format) = if kind == PipelineKind::CpuFallback {
-            let pixel_format = encoder.format();
-            let scaler = scaling::Context::get(
-                Pixel::BGRA,
-                width,
-                height,
-                pixel_format,
-                width,
-                height,
-                scaling::Flags::BILINEAR,
-            )?;
-            (
-                Some(scaler),
-                Some(VideoFrame::new(Pixel::BGRA, width, height)),
-                pixel_format,
-            )
+            let format = encoder.format();
+            let scratch = Some(VideoFrame::new(Pixel::BGRA, width, height));
+            if format == Pixel::BGRA || format == Pixel::RGBA {
+                // This encoder (e.g. AMF) takes BGRA directly, so the CPU
+                // fallback can skip swscale altogether.
+                (None, scratch, format)
+            } else {
+                let scaler = scaling::Context::get(
+                    Pixel::BGRA,
+                    width,
+                    height,
+                    format,
+                    width,
+                    height,
+                    scaling::Flags::BILINEAR,
+                )?;
+                (Some(scaler), scratch, format)
+            }
         } else {
             (None, None, encoder.format())
         };
 
+        if kind == PipelineKind::CpuFallback && scaler.is_none() {
+            eprintln!("{name} accepts BGRA directly: skipping CPU colour conversion");
+        }
         Ok(Self {
             name: name.to_string(),
             kind,
@@ -312,17 +345,17 @@ impl VideoEncoder {
             bgra.len()
         );
 
-        let scaler = self
-            .scaler
-            .as_mut()
-            .ok_or_else(|| anyhow!("encoder does not accept CPU BGRA frames"))?;
         let scratch = self
             .scratch
             .as_mut()
-            .ok_or_else(|| anyhow!("encoder does not accept CPU BGRA frames"))?;
+            .ok_or_else(|| anyhow!("encoder does not accept CPU frames"))?;
 
         let stride = scratch.stride(0);
-        {
+        if pitch == row && stride == row {
+            // No padding on either side: one copy is enough.
+            let len = row * self.height as usize;
+            scratch.data_mut(0)[..len].copy_from_slice(&bgra[..len]);
+        } else {
             let dest = scratch.data_mut(0);
             for y in 0..self.height as usize {
                 let src = &bgra[y * pitch..y * pitch + row];
@@ -331,12 +364,19 @@ impl VideoEncoder {
         }
         scratch.set_pts(Some(pts));
 
-        let mut converted = VideoFrame::new(self.out_format, self.width, self.height);
-        scaler.run(scratch, &mut converted)?;
-        converted.set_pts(Some(pts));
-
         self.pending.push_back(pts);
-        self.encoder.send_frame(&converted)?;
+        match self.scaler.as_mut() {
+            Some(scaler) => {
+                let mut converted = VideoFrame::new(self.out_format, self.width, self.height);
+                scaler.run(scratch, &mut converted)?;
+                converted.set_pts(Some(pts));
+                self.encoder.send_frame(&converted)?;
+            }
+            None => {
+                // Encoder takes BGRA natively; send the frame as-is.
+                self.encoder.send_frame(scratch)?;
+            }
+        }
 
         Ok(self.drain())
     }
@@ -384,6 +424,7 @@ fn open(
     fps: u32,
     bitrate: u64,
     hw: Option<&HwFrames>,
+    prefer_bgra: bool,
 ) -> Result<ffmpeg::encoder::video::Encoder> {
     // Hardware frames: the encoder is fed D3D11 textures directly.
     if let Some(frames) = hw {
@@ -395,21 +436,21 @@ fn open(
         return Ok(video.open_with(latency_options(name))?);
     }
 
-    // Hardware encoders want NV12 with low-latency tuning; some reject the
-    // options, so fall back to plain YUV420P.
-    if let Ok(encoder) = open_with(name, width, height, fps, bitrate, Pixel::NV12, latency_options(name))
-    {
-        return Ok(encoder);
+    // On the CPU fallback a native BGRA encoder (AMF) skips swscale entirely,
+    // so try BGRA first there; otherwise go straight to the YUV formats the
+    // encoder is expected to take.
+    let mut formats = vec![(Pixel::NV12, latency_options(name))];
+    if prefer_bgra {
+        formats.insert(0, (Pixel::BGRA, latency_options(name)));
     }
-    open_with(
-        name,
-        width,
-        height,
-        fps,
-        bitrate,
-        Pixel::YUV420P,
-        ffmpeg::Dictionary::new(),
-    )
+    formats.push((Pixel::YUV420P, ffmpeg::Dictionary::new()));
+
+    for (format, options) in formats {
+        if let Ok(encoder) = open_with(name, width, height, fps, bitrate, format, options) {
+            return Ok(encoder);
+        }
+    }
+    Err(anyhow!("encoder '{name}' rejected every supported pixel format"))
 }
 
 fn open_with(

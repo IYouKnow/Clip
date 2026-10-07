@@ -12,8 +12,11 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use ffmpeg_next::ffi;
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, ID3D11Device, ID3D11DeviceContext,
+};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
+use windows_capture::d3d11::StagingTexture;
 use windows_capture::encoder::ImageFormat;
 use windows_capture::frame::{Frame, FrameBuffer};
 use windows_capture::graphics_capture_api::InternalCaptureControl;
@@ -181,6 +184,9 @@ struct FrameForwarder {
     interval: Duration,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
+    /// Cached CPU readback texture for the fallback path (avoids allocating a
+    /// staging texture every frame).
+    readback: Option<StagingTexture>,
     /// Built on the first changed frame.
     pipeline: Option<Pipeline>,
     last_emit: Option<Instant>,
@@ -212,6 +218,7 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
             interval: Duration::from_micros(1_000_000 / config.fps.max(1) as u64),
             device: ctx.device,
             context: ctx.device_context,
+            readback: None,
             pipeline: None,
             last_emit: None,
         })
@@ -297,10 +304,8 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
                 CapturedData::Nv12(Nv12Frame(cpu))
             }
             CapturePath::CpuFallback => {
-                let (data, pitch) = {
-                    let mut buffer = frame.buffer()?;
-                    (buffer.as_raw_buffer().to_vec(), buffer.row_pitch() as usize)
-                };
+                let (data, pitch) =
+                    readback_bgra(&self.device, &self.context, &mut self.readback, frame)?;
                 CapturedData::Bgra { data, pitch }
             }
         };
@@ -365,7 +370,14 @@ fn build_pipeline(
         }
     };
 
-    let hw_frames = HwFrames::from_texture(&gpu, texture, width, height, slices)?;
+    let hw_frames = HwFrames::from_texture(
+        &gpu,
+        texture,
+        width,
+        height,
+        slices,
+        ffi::AVPixelFormat::AV_PIX_FMT_NV12,
+    )?;
 
     // Ask the encoder directly: a vendor encoder can be compiled in yet
     // unusable on this driver.
@@ -405,6 +417,44 @@ fn cpu_pipeline(width: u32, height: u32) -> Pipeline {
         processor: None,
         width,
         height,
+    }
+}
+
+/// Reads a captured frame back to CPU memory through a reused staging texture.
+///
+/// The staging texture is recreated only when the frame geometry/format changes,
+/// avoiding a GPU allocation on every frame.
+fn readback_bgra(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    slot: &mut Option<StagingTexture>,
+    frame: &Frame<'_>,
+) -> Result<(Vec<u8>, usize), BoxError> {
+    let width = frame.width();
+    let height = frame.height();
+    let format = frame.desc().Format;
+
+    let recreate = match slot {
+        Some(staging) => {
+            let desc = staging.desc();
+            desc.Width != width || desc.Height != height || desc.Format != format
+        }
+        None => true,
+    };
+    if recreate {
+        *slot = Some(StagingTexture::new(device, width, height, format)?);
+    }
+
+    let staging = slot.as_ref().expect("staging texture just created");
+    unsafe {
+        context.CopyResource(staging.texture(), frame.as_raw_texture());
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        context.Map(staging.texture(), 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+        let pitch = mapped.RowPitch as usize;
+        let len = pitch * height as usize;
+        let data = std::slice::from_raw_parts(mapped.pData as *const u8, len).to_vec();
+        context.Unmap(staging.texture(), 0);
+        Ok((data, pitch))
     }
 }
 

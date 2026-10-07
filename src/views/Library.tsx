@@ -1,9 +1,18 @@
+import { Film, FolderOpen, Play, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { Banner } from "../components/ui/Banner";
+import { Button } from "../components/ui/Button";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Modal } from "../components/ui/Modal";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Panel } from "../components/ui/Panel";
 import { api, assetUrl, formatBytes, formatDate, type Clip } from "../lib/api";
 
 export default function Library() {
   const [clips, setClips] = useState<Clip[]>([]);
   const [playing, setPlaying] = useState<Clip | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Clip | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -24,7 +33,7 @@ export default function Library() {
   }, [refresh]);
 
   async function remove(clip: Clip) {
-    if (!window.confirm(`Delete ${clip.name}?`)) return;
+    setPendingDelete(null);
     try {
       await api.deleteClip(clip.path);
       await refresh();
@@ -34,68 +43,113 @@ export default function Library() {
   }
 
   return (
-    <div className="stack">
-      <section className="card">
-        <div className="row space-between">
-          <h2>Clips</h2>
-          <button className="btn" onClick={refresh} disabled={loading}>
-            {loading ? "Refreshing…" : "Refresh"}
-          </button>
-        </div>
-        {error && <div className="banner error">{error}</div>}
+    <>
+      <PageHeader title="Library" description="Clips saved under your Videos folder.">
+        <Button
+          disabled={loading}
+          icon={<RefreshCw className="size-4" />}
+          onClick={refresh}
+        >
+          {loading ? "Refreshing…" : "Refresh"}
+        </Button>
+      </PageHeader>
 
-        {clips.length === 0 && !loading ? (
-          <p className="muted">
-            No clips yet. Start replay, then press Save clip on the Replay tab.
-          </p>
+      <div className="flex flex-col gap-4 p-6">
+        {error && <Banner tone="error">{error}</Banner>}
+
+        {clips.length === 0 ? (
+          <Panel>
+            {loading ? (
+              <p className="text-[13px] text-ink-muted">Loading clips…</p>
+            ) : (
+              <EmptyState
+                icon={Film}
+                title="No clips yet"
+                description="Start replay on the Dashboard, then press Save clip. Saved clips show up here."
+              />
+            )}
+          </Panel>
         ) : (
-          <ul className="clip-grid">
+          <ul className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3.5">
             {clips.map((clip) => (
-              <li key={clip.path} className="clip-card">
-                <button className="clip-thumb" onClick={() => setPlaying(clip)}>
-                  <span className="play-glyph">▶</span>
+              <li
+                key={clip.path}
+                className="flex flex-col overflow-hidden rounded-[var(--radius-panel)] border border-line bg-surface"
+              >
+                <button
+                  type="button"
+                  aria-label={`Play ${clip.name}`}
+                  onClick={() => setPlaying(clip)}
+                  className="grid h-28 cursor-pointer place-items-center border-b border-line bg-elevated text-ink-muted transition-colors duration-150 hover:text-ink"
+                >
+                  <Play className="size-6" />
                 </button>
-                <div className="clip-meta">
-                  <div className="clip-name" title={clip.name}>
+                <div className="px-3 pt-2.5">
+                  <div className="truncate text-sm font-medium" title={clip.name}>
                     {clip.name}
                   </div>
-                  <div className="muted small">
+                  <div className="mt-0.5 text-[12px] text-ink-muted">
                     {formatBytes(clip.size_bytes)} · {formatDate(clip.modified_ms)}
                   </div>
                 </div>
-                <div className="clip-actions">
-                  <button className="btn small" onClick={() => setPlaying(clip)}>
+                <div className="flex flex-wrap gap-1.5 p-3">
+                  <Button size="sm" onClick={() => setPlaying(clip)}>
                     Play
-                  </button>
-                  <button className="btn small" onClick={() => api.openClip(clip.path)}>
+                  </Button>
+                  <Button size="sm" onClick={() => api.openClip(clip.path)}>
                     Open
-                  </button>
-                  <button className="btn small" onClick={() => api.revealClip(clip.path)}>
+                  </Button>
+                  <Button
+                    size="sm"
+                    icon={<FolderOpen className="size-3.5" />}
+                    onClick={() => api.revealClip(clip.path)}
+                  >
                     Folder
-                  </button>
-                  <button className="btn small danger" onClick={() => remove(clip)}>
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    icon={<Trash2 className="size-3.5" />}
+                    onClick={() => setPendingDelete(clip)}
+                  >
                     Delete
-                  </button>
+                  </Button>
                 </div>
               </li>
             ))}
           </ul>
         )}
-      </section>
+      </div>
 
       {playing && (
-        <div className="modal-backdrop" onClick={() => setPlaying(null)}>
-          <div className="modal" onClick={(event) => event.stopPropagation()}>
-            <div className="row space-between">
-              <strong>{playing.name}</strong>
-              <button className="btn small" onClick={() => setPlaying(null)}>
-                Close
-              </button>
-            </div>
-            <video className="player" src={assetUrl(playing.path)} controls autoPlay />
+        <Modal title={playing.name} onClose={() => setPlaying(null)}>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <strong className="truncate text-sm" title={playing.name}>
+              {playing.name}
+            </strong>
+            <Button size="sm" onClick={() => setPlaying(null)}>
+              Close
+            </Button>
           </div>
-        </div>
+          <video
+            className="max-h-[60vh] w-full rounded-[var(--radius-control)] bg-black"
+            src={assetUrl(playing.path)}
+            controls
+            autoPlay
+          />
+        </Modal>
       )}
-    </div>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete clip"
+          message={`Delete ${pendingDelete.name}? This removes the file from disk and cannot be undone.`}
+          confirmLabel="Delete clip"
+          danger
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => remove(pendingDelete)}
+        />
+      )}
+    </>
   );
 }

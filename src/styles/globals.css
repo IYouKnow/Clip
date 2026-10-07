@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --canvas: oklch(0.985 0 0);
+  --sidebar: oklch(0.965 0 0);
+  --surface: oklch(1 0 0);
+  --elevated: oklch(0.955 0 0);
+  --line: oklch(0.9 0 0);
+  --line-strong: oklch(0.84 0 0);
+  --ink: oklch(0.2 0 0);
+  --ink-muted: oklch(0.52 0 0);
+  --ink-faint: oklch(0.65 0 0);
+  --accent: oklch(0.22 0 0);
+  --accent-ink: oklch(0.99 0 0);
+  --rec: oklch(0.58 0.22 25);
+  --focus: oklch(0.35 0 0);
+  color-scheme: light;
+}
+
+.dark {
+  --canvas: oklch(0.13 0 0);
+  --sidebar: oklch(0.16 0 0);
+  --surface: oklch(0.185 0 0);
+  --elevated: oklch(0.22 0 0);
+  --line: oklch(0.27 0 0);
+  --line-strong: oklch(0.34 0 0);
+  --ink: oklch(0.96 0 0);
+  --ink-muted: oklch(0.64 0 0);
+  --ink-faint: oklch(0.48 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-ink: oklch(0.16 0 0);
+  --rec: oklch(0.63 0.22 25);
+  --focus: oklch(0.75 0 0);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-sidebar: var(--sidebar);
+  --color-surface: var(--surface);
+  --color-elevated: var(--elevated);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-rec: var(--rec);
+  --color-focus: var(--focus);
+
+  --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  --radius-control: 8px;
+  --radius-panel: 12px;
+}
+
+@layer base {
+  html {
+    background: var(--canvas);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    @apply bg-canvas text-ink font-sans text-[15px] antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+}
+
+@keyframes rec-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--rec) 45%, transparent);
+  }
+  50% {
+    opacity: 0.65;
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--rec) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

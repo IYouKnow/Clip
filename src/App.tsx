@@ -1,20 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
+import { AppShell } from "./components/AppShell";
+import { Sidebar } from "./components/Sidebar";
 import { api, type Status } from "./lib/api";
-import Home from "./views/Home";
+import type { View } from "./lib/nav";
+import { useTheme } from "./lib/theme";
+import About from "./views/About";
+import Dashboard from "./views/Dashboard";
+import Hotkeys from "./views/Hotkeys";
 import Library from "./views/Library";
 import SettingsView from "./views/Settings";
-import "./App.css";
-
-type Tab = "home" | "library" | "settings";
-
-const TABS: { id: Tab; label: string }[] = [
-  { id: "home", label: "Replay" },
-  { id: "library", label: "Library" },
-  { id: "settings", label: "Settings" },
-];
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("home");
+  const { theme, setTheme } = useTheme();
+  const [view, setView] = useState<View>("dashboard");
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,32 +35,31 @@ export default function App() {
   }, [refresh]);
 
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-dot" data-on={status?.replaying ?? false} />
-          Clipper23
-        </div>
-        <nav className="tabs">
-          {TABS.map((entry) => (
-            <button
-              key={entry.id}
-              className={tab === entry.id ? "tab active" : "tab"}
-              onClick={() => setTab(entry.id)}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </nav>
-      </header>
-
-      {error && <div className="banner error">{error}</div>}
-
-      <main className="content">
-        {tab === "home" && <Home status={status} onChanged={refresh} />}
-        {tab === "library" && <Library />}
-        {tab === "settings" && <SettingsView status={status} onSaved={refresh} />}
-      </main>
-    </div>
+    <AppShell
+      sidebar={
+        <Sidebar
+          view={view}
+          onSelect={setView}
+          theme={theme}
+          onThemeChange={setTheme}
+          replaying={status?.replaying ?? false}
+        />
+      }
+    >
+      {view === "dashboard" && (
+        <Dashboard status={status} pollError={error} onChanged={refresh} />
+      )}
+      {view === "library" && <Library />}
+      {view === "settings" && (
+        <SettingsView
+          status={status}
+          theme={theme}
+          onThemeChange={setTheme}
+          onSaved={refresh}
+        />
+      )}
+      {view === "hotkeys" && <Hotkeys />}
+      {view === "about" && <About status={status} />}
+    </AppShell>
   );
 }
