@@ -4,7 +4,6 @@ import { Sidebar } from "./components/Sidebar";
 import { api, type Status } from "./lib/api";
 import type { View } from "./lib/nav";
 import { useTheme } from "./lib/theme";
-import About from "./views/About";
 import Home from "./views/Home";
 import Hotkeys from "./views/Hotkeys";
 import Library from "./views/Library";
@@ -59,7 +58,6 @@ export default function App() {
         />
       )}
       {view === "hotkeys" && <Hotkeys />}
-      {view === "about" && <About status={status} />}
     </AppShell>
   );
 }

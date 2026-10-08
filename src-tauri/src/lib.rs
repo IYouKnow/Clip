@@ -189,11 +189,23 @@ async fn stop_replay(state: State<'_, AppState>, app: AppHandle) -> Result<Statu
         .lock()
         .map_err(|error| error.to_string())?
         .take();
-    if let Some(session) = taken {
-        session.stop().map_err(|error| error.to_string())?;
-    }
+
+    // Report "stopped" as soon as the session is gone. Tearing capture down
+    // joins OS threads and can take a while (or stall on a wedged GPU), so the
+    // UI must leave the replaying state before that finishes.
     if let Ok(mut current) = state.stats.lock() {
         *current = None;
+    }
+
+    if let Some(session) = taken {
+        // Run the blocking teardown off the async runtime and off the command's
+        // critical path, so a slow stop can never freeze status polling or the
+        // stop button's loading state.
+        std::thread::spawn(move || {
+            if let Err(error) = session.stop() {
+                eprintln!("failed to stop replay session: {error:#}");
+            }
+        });
     }
 
     Ok(state.status(&app))

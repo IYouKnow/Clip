@@ -58,7 +58,3 @@ export function formatDate(ms: number): string {
   if (!ms) return "";
   return new Date(ms).toLocaleString();
 }
-
-export function formatMbps(bits: number): string {
-  return `${(bits / 1_000_000).toFixed(0)} Mbps`;
-}

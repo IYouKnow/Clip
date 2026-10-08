@@ -1,13 +1,12 @@
 import {
   Film,
   Home,
-  Info,
   Keyboard,
   Settings,
   type LucideIcon,
 } from "lucide-react";
 
-export type View = "home" | "library" | "settings" | "hotkeys" | "about";
+export type View = "home" | "library" | "settings" | "hotkeys";
 
 export type NavEntry = {
   id: View;
@@ -20,5 +19,4 @@ export const NAV: NavEntry[] = [
   { id: "library", label: "Library", icon: Film },
   { id: "settings", label: "Settings", icon: Settings },
   { id: "hotkeys", label: "Hotkeys", icon: Keyboard },
-  { id: "about", label: "About", icon: Info },
 ];
