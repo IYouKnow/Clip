@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import { Banner } from "../components/ui/Banner";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Panel } from "../components/ui/Panel";
-import type { Status } from "../lib/api";
+import { StatTile } from "../components/ui/StatTile";
+import { formatMbps, type Status } from "../lib/api";
 
 export default function About({ status }: { status: Status | null }) {
   const [version, setVersion] = useState<string | null>(null);
@@ -19,7 +20,10 @@ export default function About({ status }: { status: Status | null }) {
 
   return (
     <>
-      <PageHeader title="About" description="Build information for this installation." />
+      <PageHeader
+        title="About"
+        description="Build information and capture diagnostics for this installation."
+      />
 
       <div className="flex flex-col gap-4 p-6">
         {error && <Banner tone="error">{error}</Banner>}
@@ -44,6 +48,22 @@ export default function About({ status }: { status: Status | null }) {
               </dt>
               <dd className="mt-1 text-sm">Tauri 2, React 19, FFmpeg</dd>
             </div>
+          </dl>
+        </Panel>
+
+        <Panel title="Capture diagnostics">
+          <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            <StatTile label="Encoder" value={status?.encoder ?? "—"} />
+            <StatTile label="Pipeline" value={status?.pipeline ?? "—"} />
+            <StatTile
+              label="Capture"
+              value={status ? `${status.fps} fps` : "—"}
+              hint={status ? formatMbps(status.bitrate) : undefined}
+            />
+            <StatTile label="Frames captured" value={status?.frames ?? 0} />
+            <StatTile label="Packets buffered" value={status?.packets ?? 0} />
+            <StatTile label="Frames skipped" value={status?.dropped ?? 0} />
+            <StatTile label="Idle (no change)" value={status?.idle ?? 0} />
           </dl>
         </Panel>
 

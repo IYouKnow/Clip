@@ -65,7 +65,7 @@ export default function Library() {
               <EmptyState
                 icon={Film}
                 title="No clips yet"
-                description="Start replay on the Dashboard, then press Save clip. Saved clips show up here."
+                description="Start replay on Home, then press Save clip. Saved clips show up here."
               />
             )}
           </Panel>

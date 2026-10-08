@@ -5,14 +5,14 @@ import { api, type Status } from "./lib/api";
 import type { View } from "./lib/nav";
 import { useTheme } from "./lib/theme";
 import About from "./views/About";
-import Dashboard from "./views/Dashboard";
+import Home from "./views/Home";
 import Hotkeys from "./views/Hotkeys";
 import Library from "./views/Library";
 import SettingsView from "./views/Settings";
 
 export default function App() {
   const { theme, setTheme } = useTheme();
-  const [view, setView] = useState<View>("dashboard");
+  const [view, setView] = useState<View>("home");
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,8 +46,8 @@ export default function App() {
         />
       }
     >
-      {view === "dashboard" && (
-        <Dashboard status={status} pollError={error} onChanged={refresh} />
+      {view === "home" && (
+        <Home status={status} pollError={error} onChanged={refresh} />
       )}
       {view === "library" && <Library />}
       {view === "settings" && (
