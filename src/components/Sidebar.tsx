@@ -1,10 +1,8 @@
-import { Scissors } from "lucide-react";
 import { NAV, type View } from "../lib/nav";
 import type { Theme } from "../lib/theme";
 import { NavItem } from "./NavItem";
 import { StatusPill } from "./StatusPill";
 import { ThemeToggle } from "./ThemeToggle";
-import { WindowControls } from "./WindowControls";
 
 type Props = {
   view: View;
@@ -17,27 +15,6 @@ type Props = {
 export function Sidebar({ view, onSelect, theme, onThemeChange, replaying }: Props) {
   return (
     <aside className="flex w-[220px] shrink-0 flex-col border-r border-line bg-sidebar">
-      <div
-        data-tauri-drag-region
-        className="flex h-12 items-center justify-between gap-2 pl-3 pr-1.5"
-      >
-        <div data-tauri-drag-region className="flex items-center gap-2">
-          <span
-            data-tauri-drag-region
-            className="grid size-5 place-items-center rounded-[6px] bg-accent text-accent-ink"
-          >
-            <Scissors className="size-3" />
-          </span>
-          <span
-            data-tauri-drag-region
-            className="text-[13px] font-semibold tracking-tight"
-          >
-            Clipper23
-          </span>
-        </div>
-        <WindowControls />
-      </div>
-
       <nav aria-label="Main" className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2 py-2">
         {NAV.map((entry) => (
           <NavItem
