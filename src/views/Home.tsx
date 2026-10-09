@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { Film, LoaderCircle, Play, Save, Square } from "lucide-react";
+import { Film, LoaderCircle, Play, Save, Square, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { CapturePreview } from "../components/CapturePreview";
 import { ClipThumbnail } from "../components/ClipThumbnail";
@@ -83,6 +83,16 @@ export default function Home({ status, pollError, onChanged }: Props) {
     }
   }
 
+  /// Moves a recent clip to the Recycle Bin; the backend then emits
+  /// `clips-changed`, which reloads the list.
+  async function remove(clip: Clip) {
+    try {
+      await api.deleteClip(clip.path);
+    } catch (caught) {
+      setError(String(caught));
+    }
+  }
+
   const shownError = error ?? pollError;
 
   return (
@@ -156,22 +166,35 @@ export default function Home({ status, pollError, onChanged }: Props) {
           ) : (
             <div className="grid grid-cols-3 gap-2">
               {clips.map((clip) => (
-                <button
+                <div
                   key={clip.path}
-                  type="button"
-                  onClick={() => api.openClip(clip.path)}
-                  title={clip.name}
-                  aria-label={`Open ${clip.name}`}
-                  className="group relative aspect-video cursor-pointer overflow-hidden rounded-[var(--radius-control)] border border-line bg-black transition-colors hover:border-line-strong"
+                  className="group relative aspect-video overflow-hidden rounded-[var(--radius-control)] border border-line bg-black transition-colors hover:border-line-strong"
                 >
-                  <span className="absolute inset-0 grid place-items-center text-ink-faint">
-                    <Film className="size-5" />
-                  </span>
-                  <ClipThumbnail src={assetUrl(clip.path)} />
-                  <span className="absolute inset-0 grid place-items-center bg-black/0 opacity-0 transition duration-150 group-hover:bg-black/35 group-hover:opacity-100">
-                    <Play className="size-6 text-white" />
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => api.openClip(clip.path)}
+                    title={clip.name}
+                    aria-label={`Open ${clip.name}`}
+                    className="absolute inset-0 cursor-pointer"
+                  >
+                    <span className="absolute inset-0 grid place-items-center text-ink-faint">
+                      <Film className="size-5" />
+                    </span>
+                    <ClipThumbnail src={assetUrl(clip.path)} />
+                    <span className="absolute inset-0 grid place-items-center bg-black/0 opacity-0 transition duration-150 group-hover:bg-black/35 group-hover:opacity-100">
+                      <Play className="size-6 text-white" />
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => remove(clip)}
+                    title="Delete clip"
+                    aria-label={`Delete ${clip.name}`}
+                    className="invisible absolute right-1.5 top-1.5 grid size-8 cursor-pointer place-items-center rounded-full border border-white/15 bg-black/60 text-white opacity-0 backdrop-blur transition duration-150 hover:bg-rec group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                </div>
               ))}
             </div>
           )}

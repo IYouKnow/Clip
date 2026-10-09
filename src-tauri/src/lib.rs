@@ -552,7 +552,8 @@ async fn list_clips(app: AppHandle) -> Result<Vec<ClipSummary>, String> {
 
 #[tauri::command]
 fn delete_clip(app: AppHandle, path: String) -> Result<(), String> {
-    library::delete(Path::new(&path)).map_err(|error| error.to_string())?;
+    // Move to the OS Recycle Bin so a delete can be undone outside the app.
+    trash::delete(Path::new(&path)).map_err(|error| error.to_string())?;
     let _ = app.emit("clips-changed", ());
     Ok(())
 }

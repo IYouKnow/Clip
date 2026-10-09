@@ -27,6 +27,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 crossbeam-channel.workspace = true
+trash.workspace = true
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

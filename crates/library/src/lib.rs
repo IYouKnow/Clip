@@ -62,12 +62,6 @@ pub fn ensure_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Deletes a clip file.
-pub fn delete(path: &Path) -> Result<()> {
-    std::fs::remove_file(path).with_context(|| format!("deleting {}", path.display()))?;
-    Ok(())
-}
-
 fn is_clip(path: &Path) -> bool {
     path.is_file()
         && path

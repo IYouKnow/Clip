@@ -158,7 +158,7 @@ export default function Library() {
       {pendingDelete && (
         <ConfirmDialog
           title="Delete clip"
-          message={`Delete ${pendingDelete.name}? This removes the file from disk and cannot be undone.`}
+          message={`Move ${pendingDelete.name} to the Recycle Bin? You can restore it from there if you change your mind.`}
           confirmLabel="Delete clip"
           danger
           onCancel={() => setPendingDelete(null)}
