@@ -46,10 +46,22 @@ jobs:
           $v = $env:GITHUB_REF_NAME -replace '^v', ''
           node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')" $v
 
+      # The key is a single base64 line, but copying it can pick up stray
+      # newlines, which break base64 decoding. Strip whitespace and pass Tauri a
+      # file path so the secret's exact encoding stops mattering.
+      - name: Normalize signing key
+        shell: pwsh
+        env:
+          RAW_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $key = ($env:RAW_SIGNING_KEY -replace '\s', '')
+          $path = Join-Path $env:RUNNER_TEMP 'updater.key'
+          Set-Content -Path $path -Value $key -NoNewline -Encoding ascii
+          Add-Content -Path $env:GITHUB_ENV -Value "TAURI_SIGNING_PRIVATE_KEY=$path"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
