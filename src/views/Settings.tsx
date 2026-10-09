@@ -7,7 +7,13 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { Panel } from "../components/ui/Panel";
 import { Select } from "../components/ui/Select";
 import { Slider } from "../components/ui/Slider";
-import { api, type AudioSource, type Settings, type Status } from "../lib/api";
+import {
+  api,
+  type AudioDevices,
+  type AudioSource,
+  type Settings,
+  type Status,
+} from "../lib/api";
 import type { Theme } from "../lib/theme";
 import type { Updater } from "../lib/updater";
 
@@ -27,6 +33,7 @@ export default function SettingsView({
   updater,
 }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [devices, setDevices] = useState<AudioDevices>({ system: [], microphone: [] });
   const [version, setVersion] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,6 +43,10 @@ export default function SettingsView({
       .getSettings()
       .then(setSettings)
       .catch((caught) => setError(String(caught)));
+    api
+      .listAudioDevices()
+      .then(setDevices)
+      .catch(() => {});
     api
       .getVersion()
       .then(setVersion)
@@ -123,6 +134,41 @@ export default function SettingsView({
                 <option value="microphone">Microphone</option>
                 <option value="both">System + microphone</option>
               </Select>
+
+              {(settings.audio_source === "system" || settings.audio_source === "both") && (
+                <Select
+                  label="System audio device"
+                  value={settings.system_device ?? ""}
+                  onChange={(value) => update({ system_device: value || null })}
+                >
+                  <option value="">System default</option>
+                  {devices.system.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+
+              {(settings.audio_source === "microphone" ||
+                settings.audio_source === "both") && (
+                <Select
+                  label="Microphone"
+                  value={settings.microphone_device ?? ""}
+                  onChange={(value) => update({ microphone_device: value || null })}
+                >
+                  <option value="">System default</option>
+                  {devices.microphone.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+
+              {status?.replaying && status.audio && (
+                <p className="text-[12px] text-ink-faint">Recording: {status.audio}</p>
+              )}
 
               <div className="flex items-center gap-3">
                 <Button variant="primary" onClick={save}>

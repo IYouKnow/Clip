@@ -359,32 +359,53 @@ fn build_pipeline(
 
     let gpu = GpuDevice::from_parts(device.clone(), context.clone());
 
+    // Drivers disagree on the NV12 texture's bind flags (and some reject the
+    // array form for a single slice), so try the likely combinations before
+    // giving up on the GPU path.
+    let mut candidates: Vec<(u32, u32)> = hw::BIND_CANDIDATES
+        .iter()
+        .map(|flags| (*flags, hw::FRAME_POOL_SIZE))
+        .collect();
+    candidates.push((hw::BIND_RENDER_TARGET, 1));
+
+    let mut last_error: Option<anyhow::Error> = None;
+    for (bind_flags, pool) in candidates {
+        match build_gpu_pipeline(&gpu, width, height, config, bind_flags, pool) {
+            Ok(pipeline) => return Ok(pipeline),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    GPU_DISABLED.store(true, Ordering::Relaxed);
+    if let Some(error) = last_error {
+        log_gpu_fallback(&error);
+    }
+    Ok(cpu_pipeline(width, height))
+}
+
+/// Builds a GPU pipeline with the given texture bind flags and pool size, or
+/// fails so the caller can try another combination.
+fn build_gpu_pipeline(
+    gpu: &GpuDevice,
+    width: u32,
+    height: u32,
+    config: CaptureConfig,
+    bind_flags: u32,
+    pool: u32,
+) -> anyhow::Result<Pipeline> {
     // Create and validate the GPU conversion *before* building any FFmpeg
     // context, so a fallback never has to tear one down.
-    let (texture, slices) = match hw::create_nv12_texture(&gpu, width, height, hw::FRAME_POOL_SIZE) {
-        Ok(value) => value,
-        Err(error) => {
-            GPU_DISABLED.store(true, Ordering::Relaxed);
-            log_gpu_fallback(&error);
-            return Ok(cpu_pipeline(width, height));
-        }
-    };
-    let processor = match VideoProcessor::new(&gpu, &texture, slices, width, height) {
-        Ok(processor) => processor,
-        Err(error) => {
-            GPU_DISABLED.store(true, Ordering::Relaxed);
-            log_gpu_fallback(&error);
-            return Ok(cpu_pipeline(width, height));
-        }
-    };
+    let (texture, slices) = hw::create_nv12_texture(gpu, width, height, pool, bind_flags)?;
+    let processor = VideoProcessor::new(gpu, &texture, slices, width, height)?;
 
     let hw_frames = HwFrames::from_texture(
-        &gpu,
+        gpu,
         texture,
         width,
         height,
         slices,
         ffi::AVPixelFormat::AV_PIX_FMT_NV12,
+        bind_flags,
     )?;
 
     // Ask the encoder directly: a vendor encoder can be compiled in yet
@@ -396,7 +417,7 @@ fn build_pipeline(
     };
     Ok(Pipeline {
         path,
-        gpu: Some(gpu),
+        gpu: Some(gpu.clone()),
         hw_frames: Some(Arc::new(hw_frames)),
         processor: Some(processor),
         width,

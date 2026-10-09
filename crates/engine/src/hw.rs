@@ -16,27 +16,41 @@ use anyhow::{anyhow, Result};
 use ffmpeg_next::ffi;
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_TEX2D_ARRAY_VPOV, D3D11_TEX2D_VPIV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_TEX2D_ARRAY_VPOV, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
     D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2DARRAY, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2DARRAY, ID3D11Device,
+    ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
+    ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
 };
 
-/// `D3D11_BIND_RENDER_TARGET`.
+/// `D3D11_BIND_RENDER_TARGET` (0x20).
 ///
-/// The capture device only accepts NV12 textures with a render-target bind flag;
-/// `D3D11_BIND_VIDEO_ENCODER`, `DECODER` and `SHADER_RESOURCE` all return
-/// E_INVALIDARG for NV12 here, and hardware encoders accept a render-target
-/// texture as input.
-const ENCODER_TEXTURE_BIND_FLAGS: u32 = 0x0000_0008;
+/// A D3D11 video-processor output view requires the texture to have been created
+/// with the render-target bind flag. This value was previously `0x0000_0008`,
+/// which is actually `D3D11_BIND_SHADER_RESOURCE` — some drivers still let the
+/// texture be created, then reject `CreateVideoProcessorOutputView`.
+pub const BIND_RENDER_TARGET: u32 = 0x0000_0020;
+
+/// `D3D11_BIND_SHADER_RESOURCE` (0x8), kept as the historical fallback.
+pub const BIND_SHADER_RESOURCE: u32 = 0x0000_0008;
+
+/// Bind-flag combinations to try for the NV12 pool, most likely first.
+///
+/// Drivers differ: some want both flags, some only render-target, and the
+/// original build shipped shader-resource alone.
+pub const BIND_CANDIDATES: &[u32] = &[
+    BIND_RENDER_TARGET | BIND_SHADER_RESOURCE,
+    BIND_RENDER_TARGET,
+    BIND_SHADER_RESOURCE,
+];
 
 /// Number of NV12 frames kept in the hardware pool.
 pub const FRAME_POOL_SIZE: u32 = 8;
@@ -86,8 +100,9 @@ impl HwFrames {
     ///
     /// Drivers differ in how many NV12 array slices they allow (some accept only
     /// one or two), so the largest working pool size at or below `pool` is used.
-    pub fn new(device: &GpuDevice, width: u32, height: u32, pool: u32) -> Result<Self> {
-        let (texture, slices) = create_texture(device, width, height, pool, DXGI_FORMAT_NV12)?;
+    pub fn new(device: &GpuDevice, width: u32, height: u32, pool: u32, bind_flags: u32) -> Result<Self> {
+        let (texture, slices) =
+            create_texture(device, width, height, pool, DXGI_FORMAT_NV12, bind_flags)?;
         Self::from_texture(
             device,
             texture,
@@ -95,6 +110,7 @@ impl HwFrames {
             height,
             slices,
             ffi::AVPixelFormat::AV_PIX_FMT_NV12,
+            bind_flags,
         )
     }
 
@@ -109,8 +125,9 @@ impl HwFrames {
         height: u32,
         slices: u32,
         sw_format: ffi::AVPixelFormat,
+        bind_flags: u32,
     ) -> Result<Self> {
-        unsafe { Self::build(device, texture, width, height, slices, sw_format) }
+        unsafe { Self::build(device, texture, width, height, slices, sw_format, bind_flags) }
     }
 }
 
@@ -123,6 +140,7 @@ pub fn create_texture(
     height: u32,
     pool: u32,
     format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
+    bind_flags: u32,
 ) -> Result<(ID3D11Texture2D, u32)> {
     let mut array = pool.max(1);
     loop {
@@ -137,7 +155,7 @@ pub fn create_texture(
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: ENCODER_TEXTURE_BIND_FLAGS,
+            BindFlags: bind_flags,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
@@ -165,8 +183,9 @@ pub fn create_nv12_texture(
     width: u32,
     height: u32,
     pool: u32,
+    bind_flags: u32,
 ) -> Result<(ID3D11Texture2D, u32)> {
-    create_texture(device, width, height, pool, DXGI_FORMAT_NV12)
+    create_texture(device, width, height, pool, DXGI_FORMAT_NV12, bind_flags)
 }
 
 impl HwFrames {
@@ -177,6 +196,7 @@ impl HwFrames {
         height: u32,
         pool: u32,
         sw_format: ffi::AVPixelFormat,
+        bind_flags: u32,
     ) -> Result<Self> {
         // 1) D3D11VA device context around the shared device.
         let device_ref = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA);
@@ -200,7 +220,7 @@ impl HwFrames {
             // Leave video_device/video_context null: FFmpeg queries them itself.
             (*d3d).video_device = ptr::null_mut();
             (*d3d).video_context = ptr::null_mut();
-            (*d3d).BindFlags = ENCODER_TEXTURE_BIND_FLAGS;
+            (*d3d).BindFlags = bind_flags;
             (*d3d).MiscFlags = 0;
         }
 
@@ -228,7 +248,7 @@ impl HwFrames {
 
             let hw = (*frames_ctx).hwctx as *mut ffi::AVD3D11VAFramesContext;
             (*hw).texture = texture.as_raw() as *mut ffi::ID3D11Texture2D;
-            (*hw).BindFlags = ENCODER_TEXTURE_BIND_FLAGS;
+            (*hw).BindFlags = bind_flags;
             (*hw).MiscFlags = 0;
         }
 
@@ -436,10 +456,12 @@ impl VideoProcessor {
             (processor, enumerator)
         };
 
-        // One output view per array slice, built once and reused.
+        // One output view per array slice, built once and reused. Some drivers
+        // reject the array form for a single-slice texture, so fall back to the
+        // plain TEXTURE2D view in that case.
         let mut output_views = Vec::with_capacity(slices as usize);
         for slice in 0..slices {
-            let view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+            let array_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
                 ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2DARRAY,
                 Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
                     Texture2DArray: D3D11_TEX2D_ARRAY_VPOV {
@@ -450,12 +472,41 @@ impl VideoProcessor {
                 },
             };
             let mut view: Option<ID3D11VideoProcessorOutputView> = None;
+            let array_result = unsafe {
+                device.CreateVideoProcessorOutputView(texture, &enumerator, &array_desc, Some(&mut view))
+            };
+            if array_result.is_ok() {
+                output_views.push(view.ok_or_else(|| anyhow!("no output view returned"))?);
+                continue;
+            }
+            let array_error = array_result
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            if slices != 1 {
+                return Err(anyhow!(
+                    "CreateVideoProcessorOutputView (array) failed: {array_error}"
+                ));
+            }
+
+            let single_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+                },
+            };
+            let mut single: Option<ID3D11VideoProcessorOutputView> = None;
             unsafe {
                 device
-                    .CreateVideoProcessorOutputView(texture, &enumerator, &view_desc, Some(&mut view))
-                    .map_err(|e| anyhow!("CreateVideoProcessorOutputView failed: {e}"))?;
+                    .CreateVideoProcessorOutputView(texture, &enumerator, &single_desc, Some(&mut single))
+                    .map_err(|error| {
+                        anyhow!(
+                            "CreateVideoProcessorOutputView failed \
+                             (array: {array_error}; single: {error})"
+                        )
+                    })?;
             }
-            output_views.push(view.ok_or_else(|| anyhow!("no output view returned"))?);
+            output_views.push(single.ok_or_else(|| anyhow!("no output view returned"))?);
         }
 
         Ok(Self {

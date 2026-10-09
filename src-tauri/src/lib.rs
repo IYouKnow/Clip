@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use trace_engine::audio::{self, AudioTrack, DeviceInfo};
 use trace_engine::encode;
 use trace_engine::session::{AudioConfig, ReplayConfig, ReplaySession, SessionStats};
 use trace_library::{self as library, ClipSummary};
@@ -13,6 +14,7 @@ use tauri_plugin_opener::OpenerExt;
 
 mod hotkeys;
 use hotkeys::{HotkeyAction, Hotkeys};
+mod settings;
 
 /// Folder name under the user's Videos directory.
 const CLIPS_FOLDER: &str = "Trace";
@@ -37,8 +39,13 @@ impl Default for AudioSource {
 }
 
 impl AudioSource {
-    /// Maps the user-facing choice onto the engine's capture flags.
-    fn config(self) -> AudioConfig {
+    /// Maps the user-facing choice onto the engine's capture flags, keeping only
+    /// the endpoint ids for the sources that are actually enabled.
+    fn config(
+        self,
+        system_device: Option<String>,
+        microphone_device: Option<String>,
+    ) -> AudioConfig {
         let (system, microphone) = match self {
             AudioSource::Off => (false, false),
             AudioSource::System => (true, false),
@@ -49,8 +56,17 @@ impl AudioSource {
             system,
             microphone,
             bitrate: AUDIO_BITRATE,
+            system_device: if system { system_device } else { None },
+            microphone_device: if microphone { microphone_device } else { None },
         }
     }
+}
+
+/// The selectable audio endpoints for the settings UI.
+#[derive(Debug, Clone, Serialize)]
+struct AudioDevices {
+    system: Vec<DeviceInfo>,
+    microphone: Vec<DeviceInfo>,
 }
 
 /// User-configurable options.
@@ -65,6 +81,12 @@ struct Settings {
     /// Which audio sources to capture.
     #[serde(default)]
     audio_source: AudioSource,
+    /// Playback endpoint id to capture, or `None` for the system default.
+    #[serde(default)]
+    system_device: Option<String>,
+    /// Microphone endpoint id to capture, or `None` for the system default.
+    #[serde(default)]
+    microphone_device: Option<String>,
 }
 
 impl Default for Settings {
@@ -75,6 +97,8 @@ impl Default for Settings {
             bitrate: 20_000_000,
             encoder: None,
             audio_source: AudioSource::default(),
+            system_device: None,
+            microphone_device: None,
         }
     }
 }
@@ -91,7 +115,7 @@ struct Status {
     dropped: u64,
     /// Frames skipped because the screen had not changed.
     idle: u64,
-    /// Active audio tracks (e.g. "system + microphone"), if any.
+    /// Active audio devices (e.g. "system: Speakers + microphone: Headset Mic").
     audio: Option<String>,
     buffer_seconds: u32,
     fps: u32,
@@ -198,7 +222,10 @@ fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, Strin
                 fps: settings.fps,
                 bitrate: settings.bitrate,
                 buffer_seconds: settings.buffer_seconds as f64,
-                audio: settings.audio_source.config(),
+                audio: settings.audio_source.config(
+                    settings.system_device.clone(),
+                    settings.microphone_device.clone(),
+                ),
             };
 
             let started = ReplaySession::start(config, dir).map_err(|error| error.to_string())?;
@@ -371,9 +398,24 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
 }
 
 #[tauri::command]
-fn set_settings(state: State<'_, AppState>, settings: Settings) {
+fn set_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: Settings,
+) -> Result<(), String> {
+    settings::persist(&app, &settings)?;
     if let Ok(mut current) = state.settings.lock() {
         *current = settings;
+    }
+    Ok(())
+}
+
+/// Lists the selectable playback (system) and recording (microphone) endpoints.
+#[tauri::command]
+async fn list_audio_devices() -> AudioDevices {
+    AudioDevices {
+        system: audio::list_devices(AudioTrack::System).unwrap_or_default(),
+        microphone: audio::list_devices(AudioTrack::Microphone).unwrap_or_default(),
     }
 }
 
@@ -483,6 +525,9 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
+            if let Ok(mut current) = state.settings.lock() {
+                *current = settings::load(&handle);
+            }
             let stored = hotkeys::load(&handle);
             // Keep the raw bindings even if registration fails, so the page can
             // still show them and the user can fix the conflict.
@@ -508,6 +553,7 @@ pub fn run() {
             get_hotkeys,
             set_hotkeys,
             set_hotkeys_suspended,
+            list_audio_devices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

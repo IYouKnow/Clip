@@ -26,12 +26,29 @@ export type Clip = {
 
 export type AudioSource = "off" | "system" | "microphone" | "both";
 
+export type DeviceInfo = {
+  id: string;
+  track: string;
+  name: string;
+  sample_rate: number;
+  channels: number;
+  bits_per_sample: number;
+  is_float: boolean;
+};
+
+export type AudioDevices = {
+  system: DeviceInfo[];
+  microphone: DeviceInfo[];
+};
+
 export type Settings = {
   buffer_seconds: number;
   fps: number;
   bitrate: number;
   encoder: string | null;
   audio_source: AudioSource;
+  system_device: string | null;
+  microphone_device: string | null;
 };
 
 export type Hotkeys = {
@@ -52,6 +69,7 @@ export const api = {
 
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
+  listAudioDevices: () => invoke<AudioDevices>("list_audio_devices"),
 
   getHotkeys: () => invoke<Hotkeys>("get_hotkeys"),
   setHotkeys: (hotkeys: Hotkeys) => invoke<void>("set_hotkeys", { hotkeys }),

@@ -25,12 +25,27 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    println!("--- available devices ---");
+    for track in [AudioTrack::System, AudioTrack::Microphone] {
+        match audio::list_devices(track) {
+            Ok(devices) => {
+                for device in devices {
+                    println!(
+                        "{:<10} {} | {} Hz, {} ch | {}",
+                        device.track, device.name, device.sample_rate, device.channels, device.id
+                    );
+                }
+            }
+            Err(error) => println!("{:<10} cannot list: {error}", track.label()),
+        }
+    }
+
     println!("--- capturing {CAPTURE_SECONDS}s ---");
     let mut handles = Vec::new();
     let mut receivers = Vec::new();
     for track in [AudioTrack::System, AudioTrack::Microphone] {
         let (sender, receiver) = unbounded::<(AudioTrack, PcmChunk)>();
-        match audio::start_capture(track, sender, Instant::now()) {
+        match audio::start_capture(track, sender, Instant::now(), None) {
             Ok(handle) => {
                 handles.push(handle);
                 receivers.push((track, receiver));

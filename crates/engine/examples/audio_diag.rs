@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let (sender, receiver) = unbounded::<(AudioTrack, PcmChunk)>();
-    let capture = audio::start_capture(AudioTrack::System, sender, Instant::now())?;
+    let capture = audio::start_capture(AudioTrack::System, sender, Instant::now(), None)?;
     let renderer = std::thread::spawn(|| play_tone(Duration::from_secs(SECONDS)));
 
     std::thread::sleep(Duration::from_millis(SECONDS * 1000 + 500));

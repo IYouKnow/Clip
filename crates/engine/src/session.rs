@@ -105,14 +105,18 @@ impl SessionStats {
 }
 
 /// Which audio sources to capture into the clip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioConfig {
-    /// Loopback capture of the default playback device.
+    /// Loopback capture of a playback device.
     pub system: bool,
-    /// The default recording device.
+    /// A recording device.
     pub microphone: bool,
     /// Bits per second for each AAC track.
     pub bitrate: u64,
+    /// Endpoint id for the system track, or `None` for the default output.
+    pub system_device: Option<String>,
+    /// Endpoint id for the microphone, or `None` for the default input.
+    pub microphone_device: Option<String>,
 }
 
 impl Default for AudioConfig {
@@ -121,6 +125,8 @@ impl Default for AudioConfig {
             system: false,
             microphone: false,
             bitrate: 192_000,
+            system_device: None,
+            microphone_device: None,
         }
     }
 }
@@ -138,19 +144,11 @@ impl AudioConfig {
         tracks
     }
 
-    /// Human-readable label, or `None` when audio is off.
-    pub fn label(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if self.system {
-            parts.push("system");
-        }
-        if self.microphone {
-            parts.push("microphone");
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(" + "))
+    /// The endpoint id requested for `track`, if any.
+    pub fn device(&self, track: AudioTrack) -> Option<&str> {
+        match track {
+            AudioTrack::System => self.system_device.as_deref(),
+            AudioTrack::Microphone => self.microphone_device.as_deref(),
         }
     }
 }
@@ -233,12 +231,13 @@ impl ReplaySession {
         // worker keeps the sender alive so `recv` blocks instead of disconnecting
         // when audio is off.
         let (audio_tx, audio_rx) = bounded::<(AudioTrack, PcmChunk)>(512);
-        if let Some(label) = config.audio.label() {
+        if let Some(label) = audio_label(&config.audio) {
             stats.set_audio(&label);
         }
         let mut audio = Vec::new();
         for track in config.audio.tracks() {
-            match audio::start_capture(track, audio_tx.clone(), origin) {
+            let device = config.audio.device(track);
+            match audio::start_capture(track, audio_tx.clone(), origin, device) {
                 Ok(handle) => audio.push(handle),
                 Err(error) => {
                     eprintln!("audio capture ({}) unavailable: {error:#}", track.label());
@@ -591,6 +590,31 @@ fn save(
         time_base,
     )?;
     Ok(path)
+}
+
+/// Human-readable description of the devices being captured, e.g.
+/// `system: Speakers (Realtek) + microphone: Headset Microphone`, or `None` when
+/// audio is off. Falls back to the requested id when a name can't be resolved.
+fn audio_label(config: &AudioConfig) -> Option<String> {
+    let tracks = config.tracks();
+    if tracks.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for track in tracks {
+        let name = match config.device(track) {
+            Some(id) => audio::list_devices(track)
+                .ok()
+                .and_then(|devices| devices.into_iter().find(|device| device.id == id))
+                .map(|device| device.name)
+                .unwrap_or_else(|| id.to_string()),
+            None => audio::default_device_info(track)
+                .map(|device| device.name)
+                .unwrap_or_else(|_| "default".to_string()),
+        };
+        parts.push(format!("{}: {name}", track.label()));
+    }
+    Some(parts.join(" + "))
 }
 
 fn timestamp() -> u64 {

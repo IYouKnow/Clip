@@ -89,6 +89,8 @@ impl Drop for AudioCaptureHandle {
 /// A device and the format it exposes.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DeviceInfo {
+    /// WASAPI endpoint id, stable across restarts (used to re-select the device).
+    pub id: String,
     pub track: String,
     pub name: String,
     pub sample_rate: u32,
@@ -97,22 +99,67 @@ pub struct DeviceInfo {
     pub is_float: bool,
 }
 
+/// Lists the active playback (system) or capture (microphone) endpoints.
+pub fn list_devices(track: AudioTrack) -> Result<Vec<DeviceInfo>> {
+    wasapi::initialize_mta().ok()?;
+    let enumerator = DeviceEnumerator::new()?;
+    let collection = enumerator.get_device_collection(&track.endpoint())?;
+    let count = collection.get_nbr_devices()?;
+
+    let mut devices = Vec::new();
+    for index in 0..count {
+        let Ok(device) = collection.get_device_at_index(index) else {
+            continue;
+        };
+        let Ok(id) = device.get_id() else {
+            continue;
+        };
+        let name = device
+            .get_friendlyname()
+            .unwrap_or_else(|_| "(unknown device)".to_string());
+        let format = device.get_iaudioclient().and_then(|client| client.get_mixformat());
+        let (sample_rate, channels, bits_per_sample, is_float) = match format {
+            Ok(format) => (
+                format.get_samplespersec(),
+                format.get_nchannels(),
+                format.get_bitspersample(),
+                matches!(format.get_subformat(), Ok(SampleType::Float)),
+            ),
+            Err(_) => (0, 0, 0, false),
+        };
+        devices.push(DeviceInfo {
+            id,
+            track: track.label().to_string(),
+            name,
+            sample_rate,
+            channels,
+            bits_per_sample,
+            is_float,
+        });
+    }
+    Ok(devices)
+}
+
 /// Starts capturing `track`, forwarding PCM chunks to `sink`.
 ///
 /// `origin` is the shared session clock; chunk timestamps are expressed as
-/// microseconds elapsed from it, matching the video capture timeline.
+/// microseconds elapsed from it, matching the video capture timeline. `device_id`
+/// selects a specific endpoint; `None` (or an id that no longer exists) uses the
+/// system default.
 pub fn start_capture(
     track: AudioTrack,
     sink: Sender<(AudioTrack, PcmChunk)>,
     origin: Instant,
+    device_id: Option<&str>,
 ) -> Result<AudioCaptureHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
+    let device_id = device_id.map(str::to_string);
 
     let thread = std::thread::Builder::new()
         .name(format!("trace-audio-{}", track.label()))
         .spawn(move || {
-            if let Err(error) = capture_loop(track, sink, thread_stop, origin) {
+            if let Err(error) = capture_loop(track, sink, thread_stop, origin, device_id) {
                 eprintln!("audio capture ({}): {error:#}", track.label());
             }
         })?;
@@ -132,6 +179,7 @@ pub fn default_device_info(track: AudioTrack) -> Result<DeviceInfo> {
     let format = device.get_iaudioclient()?.get_mixformat()?;
 
     Ok(DeviceInfo {
+        id: device.get_id().unwrap_or_default(),
         track: track.label().to_string(),
         name,
         sample_rate: format.get_samplespersec(),
@@ -146,12 +194,19 @@ fn capture_loop(
     sink: Sender<(AudioTrack, PcmChunk)>,
     stop: Arc<AtomicBool>,
     origin: Instant,
+    device_id: Option<String>,
 ) -> Result<()> {
     // COM must be initialised on this thread.
     wasapi::initialize_mta().ok()?;
 
     let enumerator = DeviceEnumerator::new()?;
-    let device = enumerator.get_default_device(&track.endpoint())?;
+    // Prefer the requested endpoint, but fall back to the default if it is gone.
+    let device = match device_id.as_deref() {
+        Some(id) => enumerator
+            .get_device(id)
+            .or_else(|_| enumerator.get_default_device(&track.endpoint()))?,
+        None => enumerator.get_default_device(&track.endpoint())?,
+    };
     let mut client = device.get_iaudioclient()?;
     let format: WaveFormat = client.get_mixformat()?;
 
