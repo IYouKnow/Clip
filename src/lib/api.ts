@@ -30,6 +30,11 @@ export type Settings = {
   encoder: string | null;
 };
 
+export type Hotkeys = {
+  toggle_replay: string | null;
+  save_clip: string | null;
+};
+
 export const api = {
   getStatus: () => invoke<Status>("get_status"),
   startReplay: () => invoke<Status>("start_replay"),
@@ -43,6 +48,11 @@ export const api = {
 
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
+
+  getHotkeys: () => invoke<Hotkeys>("get_hotkeys"),
+  setHotkeys: (hotkeys: Hotkeys) => invoke<void>("set_hotkeys", { hotkeys }),
+  setHotkeysSuspended: (suspended: boolean) =>
+    invoke<void>("set_hotkeys_suspended", { suspended }),
 
   getVersion: () => getVersion(),
 };
