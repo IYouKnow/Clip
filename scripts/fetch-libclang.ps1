@@ -41,7 +41,7 @@ if (-not $wheel) {
 }
 Write-Host ("Using " + $wheel.filename)
 
-$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("clipper23-libclang-" + [guid]::NewGuid())
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("trace-libclang-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
 try {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 export type Theme = "system" | "light" | "dark";
 
-const STORAGE_KEY = "clipper23.theme";
+const STORAGE_KEY = "trace.theme";
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 function readStoredTheme(): Theme {

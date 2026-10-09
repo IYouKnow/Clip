@@ -1,4 +1,4 @@
-//! clipper23 engine: capture, encode, replay buffer and clip saving.
+//! trace engine: capture, encode, replay buffer and clip saving.
 //!
 //! Pipeline: `capture` -> `encode` -> `ring` (+ `audio`) -> `mux` -> `session`.
 

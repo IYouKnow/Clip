@@ -145,7 +145,7 @@ impl ReplaySession {
         let fps = config.fps;
         let bitrate = config.bitrate;
         let worker = std::thread::Builder::new()
-            .name("clipper23-encoder".into())
+            .name("trace-encoder".into())
             .spawn(move || {
                 hw::set_current_thread_below_normal();
                 if let Err(error) = run(frame_rx, command_rx, config, worker_dir, worker_stats) {

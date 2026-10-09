@@ -98,7 +98,7 @@ pub fn start_capture(track: AudioTrack, sink: Sender<PcmChunk>) -> Result<AudioC
     let thread_stop = stop.clone();
 
     let thread = std::thread::Builder::new()
-        .name(format!("clipper23-audio-{}", track.label()))
+        .name(format!("trace-audio-{}", track.label()))
         .spawn(move || {
             if let Err(error) = capture_loop(track, sink, thread_stop) {
                 eprintln!("audio capture ({}): {error:#}", track.label());

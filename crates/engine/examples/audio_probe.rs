@@ -3,11 +3,11 @@
 //! Captures two seconds from system loopback and the microphone, then reports
 //! how much data arrived and its peak level.
 //!
-//! Usage: `cargo run -p clipper23-engine --example audio_probe`
+//! Usage: `cargo run -p trace-engine --example audio_probe`
 
 use std::time::Duration;
 
-use clipper23_engine::audio::{self, AudioTrack, PcmChunk};
+use trace_engine::audio::{self, AudioTrack, PcmChunk};
 use crossbeam_channel::unbounded;
 
 const CAPTURE_SECONDS: u64 = 2;

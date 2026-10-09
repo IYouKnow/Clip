@@ -1,12 +1,12 @@
 //! Records the primary monitor for a few seconds, then saves the replay buffer
 //! as an MP4.
 //!
-//! Usage: `cargo run -p clipper23-engine --example replay -- [seconds] [out-dir]`
+//! Usage: `cargo run -p trace-engine --example replay -- [seconds] [out-dir]`
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clipper23_engine::session::{ReplayConfig, ReplaySession};
+use trace_engine::session::{ReplayConfig, ReplaySession};
 
 fn main() -> anyhow::Result<()> {
     let seconds: f64 = std::env::args()

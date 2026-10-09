@@ -4,7 +4,7 @@
 //! adapter with no video processor, which rejects output views while still
 //! allowing capture.
 //!
-//! Usage: `cargo run -p clipper23-engine --example adapter_probe`
+//! Usage: `cargo run -p trace-engine --example adapter_probe`
 
 use windows::core::Interface;
 use windows::Win32::Foundation::HMODULE;

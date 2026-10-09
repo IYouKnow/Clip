@@ -4,12 +4,12 @@
 //! This proves the loopback wiring independently of whatever happens to be
 //! playing on the machine.
 //!
-//! Usage: `cargo run -p clipper23-engine --example audio_selftest`
+//! Usage: `cargo run -p trace-engine --example audio_selftest`
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use clipper23_engine::audio::{self, AudioTrack, PcmChunk};
+use trace_engine::audio::{self, AudioTrack, PcmChunk};
 use crossbeam_channel::unbounded;
 use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode};
 

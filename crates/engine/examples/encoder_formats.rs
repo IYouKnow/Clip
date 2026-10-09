@@ -1,6 +1,6 @@
 //! Diagnostic: which input pixel formats will each H.264 encoder actually open with?
 //!
-//! Usage: `cargo run -p clipper23-engine --example encoder_formats`
+//! Usage: `cargo run -p trace-engine --example encoder_formats`
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg::format::Pixel;

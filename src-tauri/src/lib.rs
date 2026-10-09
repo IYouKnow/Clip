@@ -3,15 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use clipper23_engine::encode;
-use clipper23_engine::session::{ReplayConfig, ReplaySession, SessionStats};
-use clipper23_library::{self as library, ClipSummary};
+use trace_engine::encode;
+use trace_engine::session::{ReplayConfig, ReplaySession, SessionStats};
+use trace_library::{self as library, ClipSummary};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 /// Folder name under the user's Videos directory.
-const CLIPS_FOLDER: &str = "Clipper23";
+const CLIPS_FOLDER: &str = "Trace";
 
 /// User-configurable options.
 #[derive(Debug, Clone, Serialize, Deserialize)]

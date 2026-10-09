@@ -4,13 +4,13 @@
 //! Generates moving frames, encodes them, buffers them, then writes a clip and
 //! reports what the ring selected.
 //!
-//! Usage: `cargo run -p clipper23-engine --example encode_synthetic -- out.mp4`
+//! Usage: `cargo run -p trace-engine --example encode_synthetic -- out.mp4`
 
 use std::path::PathBuf;
 
-use clipper23_engine::encode::VideoEncoder;
-use clipper23_engine::mux;
-use clipper23_engine::ring::PacketRing;
+use trace_engine::encode::VideoEncoder;
+use trace_engine::mux;
+use trace_engine::ring::PacketRing;
 
 const WIDTH: u32 = 960;
 const HEIGHT: u32 = 540;

@@ -520,51 +520,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clipper23"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clipper23-engine",
- "clipper23-library",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tauri-plugin-process",
- "tauri-plugin-updater",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
-name = "clipper23-engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossbeam-channel",
- "ffmpeg-next",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tracing",
- "wasapi",
- "windows",
- "windows-capture",
-]
-
-[[package]]
-name = "clipper23-library"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
 name = "combine"
 version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4471,6 +4426,51 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+
+[[package]]
+name = "trace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tauri-plugin-process",
+ "tauri-plugin-updater",
+ "thiserror 2.0.21",
+ "trace-engine",
+ "trace-library",
+ "tracing",
+]
+
+[[package]]
+name = "trace-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "ffmpeg-next",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+ "wasapi",
+ "windows",
+ "windows-capture",
+]
+
+[[package]]
+name = "trace-library"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
 
 [[package]]
 name = "tracing"

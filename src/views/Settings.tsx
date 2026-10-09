@@ -151,7 +151,7 @@ export default function SettingsView({
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between gap-4">
               <p className="text-[13px] text-ink-muted">
-                Clipper23 {version ?? "…"}
+                Trace {version ?? "…"}
               </p>
               <Button
                 size="sm"

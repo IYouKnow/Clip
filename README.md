@@ -1,6 +1,8 @@
-# Tauri + React + Typescript
+# Trace
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+A Windows screen replay tool: Trace continuously captures your primary monitor into a rolling
+buffer, so a hotkey or button can save the last N seconds as an `.mp4`. Under the hood it is a
+Tauri v2 desktop shell over a Rust capture/encode engine, with a React + TypeScript frontend.
 
 ## Recommended IDE Setup
 
@@ -8,7 +10,7 @@ This template should help get you started developing with Tauri, React and Types
 
 ## Releasing
 
-Releases are built and published by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+Releases are built and published by [`.github/workflows/trace.yml`](.github/workflows/trace.yml).
 Pushing a tag that starts with `v` builds the NSIS and MSI installers for Windows, signs them
 for the in-app updater, and publishes a GitHub Release with a `latest.json` manifest.
 
@@ -28,10 +30,10 @@ committed version is just the local dev default.
    keypair (the CLI prompts for the password):
 
    ```sh
-   pnpm tauri signer generate -w ~/.tauri/clipper23.key
+   pnpm tauri signer generate -w ~/.tauri/trace.key
    ```
 
-   - Put the **public** key (`clipper23.key.pub`) in `plugins.updater.pubkey` in
+   - Put the **public** key (`trace.key.pub`) in `plugins.updater.pubkey` in
      `src-tauri/tauri.conf.json`.
    - Add two repository secrets (Settings → Secrets and variables → Actions → New repository
      secret): `TAURI_SIGNING_PRIVATE_KEY` (the private key) and

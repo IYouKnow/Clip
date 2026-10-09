@@ -3,7 +3,7 @@
     Downloads an MSVC-built FFmpeg shared distribution and unpacks it for linking.
 
 .DESCRIPTION
-    clipper23 links FFmpeg as libraries (not a sidecar). ffmpeg-sys-next needs
+    trace links FFmpeg as libraries (not a sidecar). ffmpeg-sys-next needs
     MSVC import libraries (.lib) and headers, which the System233/ffmpeg-msvc-prebuilt
     project publishes. This script pins one version so builds are reproducible and
     installs it to third_party/ffmpeg as { bin, include, lib }.
@@ -47,7 +47,7 @@ if (Test-Path (Join-Path $dest "include\libavcodec\avcodec.h")) {
     exit 0
 }
 
-$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("clipper23-ffmpeg-" + [guid]::NewGuid())
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("trace-ffmpeg-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
 try {

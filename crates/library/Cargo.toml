@@ -1,12 +1,12 @@
 [package]
-name = "clipper23-library"
+name = "trace-library"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Clip library index (SQLite) and file management for clipper23"
+description = "Clip library index (SQLite) and file management for trace"
 
 [lib]
-name = "clipper23_library"
+name = "trace_library"
 path = "src/lib.rs"
 
 [dependencies]

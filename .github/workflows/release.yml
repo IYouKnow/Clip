@@ -1,4 +1,4 @@
-name: release
+name: Trace
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  trace:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +75,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "Clipper23 ${{ github.ref_name }}"
+          releaseName: "Trace ${{ github.ref_name }}"
           releaseBody: "Installers below. Existing installs will update automatically."
           releaseDraft: false
           prerelease: false

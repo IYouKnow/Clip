@@ -1,12 +1,12 @@
 [package]
-name = "clipper23-engine"
+name = "trace-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Capture, hardware encode, replay buffer and clip saving for clipper23"
+description = "Capture, hardware encode, replay buffer and clip saving for trace"
 
 [lib]
-name = "clipper23_engine"
+name = "trace_engine"
 path = "src/lib.rs"
 
 [dependencies]
