@@ -145,7 +145,7 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
                 let running = state.session.lock().map(|s| s.is_some()).unwrap_or(false);
                 let outcome = if id == "save" {
                     if running {
-                        crate::save_clip_inner(&state).map(|_| ())
+                        crate::save_clip_inner(&app, &state).map(|_| ())
                     } else {
                         Ok(())
                     }

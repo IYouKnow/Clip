@@ -74,12 +74,11 @@ const KEY_LABELS: Record<string, string> = {
   NumpadEnter: "Num Enter",
 };
 
-/// Builds a Tauri accelerator (e.g. `Ctrl+Shift+KeyR`) from a keydown event.
-/// Returns null for modifier-only presses or combinations with no strong
-/// modifier, which are too likely to clash with normal typing.
+/// Builds an accelerator (e.g. `Ctrl+Shift+KeyR`) from a keydown event.
+/// Returns null for modifier-only presses; otherwise any key may be bound,
+/// with or without modifiers.
 function acceleratorFromEvent(event: KeyboardEvent): string | null {
   if (MODIFIER_CODES.has(event.code)) return null;
-  if (!event.ctrlKey && !event.altKey && !event.metaKey) return null;
 
   const parts: string[] = [];
   if (event.ctrlKey) parts.push("Ctrl");
@@ -305,8 +304,9 @@ export default function HotkeysView() {
         <p className="flex items-start gap-2 text-[12px] text-ink-faint">
           <Keyboard className="mt-0.5 size-3.5 shrink-0" />
           <span>
-            Click a shortcut, then press the combination. Include Ctrl, Alt, or Win.
-            Esc cancels and Backspace clears. Changes take effect when you save.
+            Click a shortcut, then press the key combination — Ctrl, Alt, Shift, or Win
+            are optional. It works even when Trace is in the background. Esc cancels and
+            Backspace clears. Changes take effect when you save.
             {saved && dirty === false && (
               <span className="text-ink-muted"> Saved.</span>
             )}

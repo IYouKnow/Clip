@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { Film, FolderOpen, Play, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Banner } from "../components/ui/Banner";
@@ -30,6 +31,20 @@ export default function Library() {
 
   useEffect(() => {
     refresh();
+  }, [refresh]);
+
+  // Keep the list current when a clip is saved or deleted elsewhere (hotkey,
+  // tray, or another view).
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen("clips-changed", () => {
+      refresh();
+    })
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
   }, [refresh]);
 
   async function remove(clip: Clip) {

@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { Film, LoaderCircle, Play, Save, Square } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { CapturePreview } from "../components/CapturePreview";
@@ -42,6 +43,20 @@ export default function Home({ status, pollError, onChanged }: Props) {
     loadClips();
   }, [loadClips]);
 
+  // Any save path — the button, the global hotkey, or the tray — emits this,
+  // so recents update without needing to leave and re-enter the view.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen("clips-changed", () => {
+      loadClips();
+    })
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, [loadClips]);
+
   async function runReplay() {
     setReplayBusy(true);
     setError(null);
@@ -60,7 +75,6 @@ export default function Home({ status, pollError, onChanged }: Props) {
     setError(null);
     try {
       await api.saveClip();
-      await loadClips();
       onChanged();
     } catch (caught) {
       setError(String(caught));

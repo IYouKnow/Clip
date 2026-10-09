@@ -11,11 +11,11 @@ use trace_engine::encode;
 use trace_engine::session::{AudioConfig, ReplayConfig, ReplaySession, SessionStats};
 use trace_library::{self as library, ClipSummary};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State, WindowEvent};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
+mod hook;
 mod hotkeys;
 use hotkeys::{HotkeyAction, Hotkeys};
 mod settings;
@@ -160,8 +160,6 @@ struct AppState {
     encoders: Mutex<Option<Vec<String>>>,
     /// Configured bindings, persisted to `hotkeys.json`.
     hotkeys: Mutex<Hotkeys>,
-    /// Currently registered accelerators and the action each one fires.
-    bindings: Mutex<Vec<(Shortcut, HotkeyAction)>>,
     /// The running microphone test, if any.
     mic_test: Mutex<Option<MicTest>>,
     /// Tray icon and menu handles, populated in `setup`.
@@ -303,7 +301,7 @@ fn stop_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, String
 }
 
 /// Saves the last `buffer_seconds` of captured video to a new clip.
-fn save_clip_inner(state: &AppState) -> Result<ClipSummary, String> {
+fn save_clip_inner(app: &AppHandle, state: &AppState) -> Result<ClipSummary, String> {
     // Take the path out from under the lock before the blocking mux.
     let path = {
         let seconds = state
@@ -320,63 +318,17 @@ fn save_clip_inner(state: &AppState) -> Result<ClipSummary, String> {
             .map_err(|error| error.to_string())?
     };
 
+    // A clip now exists on disk, so let any open view reload it — even if
+    // summarizing the file below fails.
+    let _ = app.emit("clips-changed", ());
+
     library::summary(&path).map_err(|error| error.to_string())
 }
 
-/// Parses the configured accelerators into registrable shortcuts, rejecting
-/// invalid strings and duplicates.
-fn parse_bindings(hotkeys: &Hotkeys) -> Result<Vec<(Shortcut, HotkeyAction)>, String> {
-    let mut bindings: Vec<(Shortcut, HotkeyAction)> = Vec::new();
-    for (action, accelerator) in hotkeys.entries() {
-        let Some(accelerator) = accelerator.as_deref().map(str::trim) else {
-            continue;
-        };
-        if accelerator.is_empty() {
-            continue;
-        }
-        let shortcut: Shortcut = accelerator
-            .parse()
-            .map_err(|_| format!("\"{accelerator}\" is not a valid shortcut"))?;
-        if bindings
-            .iter()
-            .any(|(existing, _)| existing.matches(shortcut.mods, shortcut.key))
-        {
-            return Err(format!("\"{accelerator}\" is assigned to more than one action"));
-        }
-        bindings.push((shortcut, action));
-    }
-    Ok(bindings)
-}
-
-/// Unregisters everything and registers exactly `bindings`.
-fn register_bindings(
-    app: &AppHandle,
-    bindings: &[(Shortcut, HotkeyAction)],
-) -> Result<(), String> {
-    let manager = app.global_shortcut();
-    let _ = manager.unregister_all();
-    for (shortcut, _) in bindings {
-        manager
-            .register(*shortcut)
-            .map_err(|error| format!("could not register {shortcut}: {error}"))?;
-    }
-    Ok(())
-}
-
-/// Validates, registers (rolling back on failure) and persists new bindings.
+/// Validates and arms new bindings, then persists them.
 fn apply_hotkeys(app: &AppHandle, state: &AppState, hotkeys: Hotkeys) -> Result<(), String> {
-    let next = parse_bindings(&hotkeys)?;
-    let previous = state.bindings.lock().map(|b| b.clone()).unwrap_or_default();
-
-    if let Err(error) = register_bindings(app, &next) {
-        // Put the working set back so a bad binding can't leave us with none.
-        let _ = register_bindings(app, &previous);
-        return Err(error);
-    }
-
-    if let Ok(mut stored) = state.bindings.lock() {
-        *stored = next;
-    }
+    let bindings = hotkeys::parse_bindings(&hotkeys)?;
+    hook::set_bindings(bindings);
     if let Ok(mut stored) = state.hotkeys.lock() {
         *stored = hotkeys.clone();
     }
@@ -394,33 +346,11 @@ fn run_hotkey_action(app: &AppHandle, state: &AppState, action: HotkeyAction) {
                 start_replay_inner(app, state)
             }
         }
-        HotkeyAction::SaveClip => save_clip_inner(state).map(|_| state.status(app)),
+        HotkeyAction::SaveClip => save_clip_inner(app, state).map(|_| state.status(app)),
     };
     if let Err(error) = outcome {
         eprintln!("global hotkey action failed: {error}");
     }
-}
-
-/// Dispatches a global shortcut event to the matching action on a worker thread
-/// so the mux/teardown work never blocks the event loop.
-fn on_global_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
-    if event.state != ShortcutState::Pressed {
-        return;
-    }
-    let app = app.clone();
-    let shortcut = *shortcut;
-    std::thread::spawn(move || {
-        let state = app.state::<AppState>();
-        let action = state.bindings.lock().ok().and_then(|bindings| {
-            bindings
-                .iter()
-                .find(|(candidate, _)| candidate.matches(shortcut.mods, shortcut.key))
-                .map(|(_, action)| *action)
-        });
-        if let Some(action) = action {
-            run_hotkey_action(&app, &state, action);
-        }
-    });
 }
 
 #[tauri::command]
@@ -575,8 +505,8 @@ async fn stop_replay(state: State<'_, AppState>, app: AppHandle) -> Result<Statu
 }
 
 #[tauri::command]
-async fn save_clip(state: State<'_, AppState>) -> Result<ClipSummary, String> {
-    save_clip_inner(&state)
+async fn save_clip(app: AppHandle, state: State<'_, AppState>) -> Result<ClipSummary, String> {
+    save_clip_inner(&app, &state)
 }
 
 #[tauri::command]
@@ -597,24 +527,21 @@ fn set_hotkeys(
     apply_hotkeys(&app, &state, hotkeys)
 }
 
-/// Clears (or restores) the registered shortcuts so the UI can capture a new
+/// Clears (or restores) the armed shortcuts so the UI can capture a new
 /// combination without the old binding firing mid-record.
 #[tauri::command]
-fn set_hotkeys_suspended(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    suspended: bool,
-) -> Result<(), String> {
+fn set_hotkeys_suspended(state: State<'_, AppState>, suspended: bool) -> Result<(), String> {
     if suspended {
-        return register_bindings(&app, &[]);
+        hook::set_bindings(Vec::new());
+        return Ok(());
     }
     let stored = state
         .hotkeys
         .lock()
         .map(|hotkeys| hotkeys.clone())
         .unwrap_or_default();
-    let bindings = parse_bindings(&stored)?;
-    register_bindings(&app, &bindings)
+    hook::set_bindings(hotkeys::parse_bindings(&stored)?);
+    Ok(())
 }
 
 #[tauri::command]
@@ -624,8 +551,10 @@ async fn list_clips(app: AppHandle) -> Result<Vec<ClipSummary>, String> {
 }
 
 #[tauri::command]
-fn delete_clip(path: String) -> Result<(), String> {
-    library::delete(Path::new(&path)).map_err(|error| error.to_string())
+fn delete_clip(app: AppHandle, path: String) -> Result<(), String> {
+    library::delete(Path::new(&path)).map_err(|error| error.to_string())?;
+    let _ = app.emit("clips-changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -645,11 +574,11 @@ fn reveal_clip(app: AppHandle, path: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(on_global_shortcut)
-                .build(),
-        )
+        // tao registers raw keyboard input devices by default, which stops a
+        // low-level keyboard hook from firing while one of our own WebView2
+        // windows is focused. `Always` removes that registration (RIDEV_REMOVE),
+        // keeping the hook alive when Trace itself has focus. See wry#1761.
+        .device_event_filter(tauri::DeviceEventFilter::Always)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
@@ -661,7 +590,6 @@ pub fn run() {
             clips_dir: Mutex::new(None),
             encoders: Mutex::new(None),
             hotkeys: Mutex::new(Hotkeys::default()),
-            bindings: Mutex::new(Vec::new()),
             mic_test: Mutex::new(None),
             tray: Mutex::new(None),
             quitting: AtomicBool::new(false),
@@ -672,14 +600,33 @@ pub fn run() {
             if let Ok(mut current) = state.settings.lock() {
                 *current = settings::load(&handle);
             }
+
+            // Arm global hotkeys. The hook forwards matches to a worker thread so
+            // capture/mux work never runs inside the OS hook callback.
+            let (actions_tx, actions_rx) = unbounded::<HotkeyAction>();
+            match hook::install(actions_tx) {
+                Ok(()) => {
+                    let worker = handle.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("trace-hotkey-worker".into())
+                        .spawn(move || {
+                            while let Ok(action) = actions_rx.recv() {
+                                let state = worker.state::<AppState>();
+                                run_hotkey_action(&worker, &state, action);
+                            }
+                        });
+                }
+                Err(error) => eprintln!("failed to install hotkey hook: {error}"),
+            }
+
             let stored = hotkeys::load(&handle);
-            // Keep the raw bindings even if registration fails, so the page can
-            // still show them and the user can fix the conflict.
+            // Keep the raw bindings even if a shortcut is invalid, so the page can
+            // still show them and the user can fix them.
             if let Ok(mut current) = state.hotkeys.lock() {
                 *current = stored.clone();
             }
             if let Err(error) = apply_hotkeys(&handle, &state, stored) {
-                eprintln!("failed to register stored hotkeys: {error}");
+                eprintln!("failed to apply stored hotkeys: {error}");
             }
             if let Err(error) = tray::build(&handle) {
                 eprintln!("failed to create tray icon: {error}");
