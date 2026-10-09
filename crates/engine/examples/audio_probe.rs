@@ -5,7 +5,7 @@
 //!
 //! Usage: `cargo run -p trace-engine --example audio_probe`
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use trace_engine::audio::{self, AudioTrack, PcmChunk};
 use crossbeam_channel::unbounded;
@@ -29,8 +29,8 @@ fn main() -> anyhow::Result<()> {
     let mut handles = Vec::new();
     let mut receivers = Vec::new();
     for track in [AudioTrack::System, AudioTrack::Microphone] {
-        let (sender, receiver) = unbounded::<PcmChunk>();
-        match audio::start_capture(track, sender) {
+        let (sender, receiver) = unbounded::<(AudioTrack, PcmChunk)>();
+        match audio::start_capture(track, sender, Instant::now()) {
             Ok(handle) => {
                 handles.push(handle);
                 receivers.push((track, receiver));
@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
         let mut chunks = 0usize;
         let mut bytes = 0usize;
         let mut peak = 0u8;
-        while let Ok(chunk) = receiver.try_recv() {
+        while let Ok((_, chunk)) = receiver.try_recv() {
             chunks += 1;
             bytes += chunk.data.len();
             for &byte in &chunk.data {

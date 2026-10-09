@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
 
     let time_base = ring.time_base();
     let packets = ring.slice_mut(range);
-    mux::write_mp4(&out, encoder.inner(), time_base, packets)?;
+    mux::write_mp4(&out, (encoder.inner(), packets), &mut [], time_base)?;
 
     println!("wrote {}", out.display());
     Ok(())

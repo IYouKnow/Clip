@@ -8,14 +8,18 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
 use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
 /// How often the capture loop polls the device.
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const POLL_INTERVAL: Duration = Duration::from_millis(3);
+
+/// Device buffer to request (100 ns units). A little slack so a late poll does
+/// not overflow the engine buffer and drop samples.
+const CAPTURE_BUFFER_HNS: i64 = 500_000; // 50 ms
 
 /// Which audio source to capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +59,8 @@ pub struct PcmChunk {
     pub channels: u16,
     pub bits_per_sample: u16,
     pub is_float: bool,
-    /// Microseconds since capture started.
+    /// Microseconds since the shared session origin (the same clock the video
+    /// capture thread stamps frames with), so audio and video share a timeline.
     pub timestamp_micros: i64,
 }
 
@@ -93,14 +98,21 @@ pub struct DeviceInfo {
 }
 
 /// Starts capturing `track`, forwarding PCM chunks to `sink`.
-pub fn start_capture(track: AudioTrack, sink: Sender<PcmChunk>) -> Result<AudioCaptureHandle> {
+///
+/// `origin` is the shared session clock; chunk timestamps are expressed as
+/// microseconds elapsed from it, matching the video capture timeline.
+pub fn start_capture(
+    track: AudioTrack,
+    sink: Sender<(AudioTrack, PcmChunk)>,
+    origin: Instant,
+) -> Result<AudioCaptureHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
 
     let thread = std::thread::Builder::new()
         .name(format!("trace-audio-{}", track.label()))
         .spawn(move || {
-            if let Err(error) = capture_loop(track, sink, thread_stop) {
+            if let Err(error) = capture_loop(track, sink, thread_stop, origin) {
                 eprintln!("audio capture ({}): {error:#}", track.label());
             }
         })?;
@@ -129,7 +141,12 @@ pub fn default_device_info(track: AudioTrack) -> Result<DeviceInfo> {
     })
 }
 
-fn capture_loop(track: AudioTrack, sink: Sender<PcmChunk>, stop: Arc<AtomicBool>) -> Result<()> {
+fn capture_loop(
+    track: AudioTrack,
+    sink: Sender<(AudioTrack, PcmChunk)>,
+    stop: Arc<AtomicBool>,
+    origin: Instant,
+) -> Result<()> {
     // COM must be initialised on this thread.
     wasapi::initialize_mta().ok()?;
 
@@ -151,7 +168,7 @@ fn capture_loop(track: AudioTrack, sink: Sender<PcmChunk>, stop: Arc<AtomicBool>
         &Direction::Capture,
         &StreamMode::PollingShared {
             autoconvert: true,
-            buffer_duration_hns: min_period,
+            buffer_duration_hns: min_period.max(CAPTURE_BUFFER_HNS),
         },
     )?;
 
@@ -160,11 +177,23 @@ fn capture_loop(track: AudioTrack, sink: Sender<PcmChunk>, stop: Arc<AtomicBool>
 
     client.start_stream()?;
 
+    // Where this stream lands on the shared session clock. Chunks are then
+    // stamped as this offset plus the sample-accurate time they represent.
+    let origin_offset_micros = origin.elapsed().as_micros() as i64;
+
     let mut frames_delivered: u64 = 0;
     let mut closed = false;
 
     while !stop.load(Ordering::Relaxed) {
-        capture.read_from_device_to_deque(&mut queue)?;
+        // A single read only drains one packet; read every packet the engine has
+        // buffered, or the rest is overwritten and the audio comes out choppy.
+        loop {
+            let available = capture.get_next_packet_size()?.unwrap_or(0);
+            if available == 0 {
+                break;
+            }
+            capture.read_from_device_to_deque(&mut queue)?;
+        }
 
         if !queue.is_empty() {
             let data: Vec<u8> = queue.drain(..).collect();
@@ -177,11 +206,12 @@ fn capture_loop(track: AudioTrack, sink: Sender<PcmChunk>, stop: Arc<AtomicBool>
                 channels,
                 bits_per_sample,
                 is_float,
-                timestamp_micros: frames_delivered as i64 * 1_000_000 / sample_rate.max(1) as i64,
+                timestamp_micros: origin_offset_micros
+                    + frames_delivered as i64 * 1_000_000 / sample_rate.max(1) as i64,
             };
 
             // A closed channel means the session shut down.
-            if sink.send(chunk).is_err() {
+            if sink.send((track, chunk)).is_err() {
                 closed = true;
                 break;
             }

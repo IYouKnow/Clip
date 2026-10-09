@@ -8,11 +8,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Result};
 use crossbeam_channel::{bounded, select, Receiver, Sender};
+use ffmpeg_next as ffmpeg;
 
+use crate::audio::{self, AudioCaptureHandle, AudioTrack, PcmChunk};
+use crate::audio_encode::AudioEncoder;
 use crate::capture::{
     self, CaptureHandle, CaptureMessage, CapturePath, CapturedData,
 };
@@ -31,6 +34,9 @@ pub struct SessionStats {
     dropped: AtomicU64,
     /// Frames the compositor reported as unchanged (and so cost nothing).
     idle: AtomicU64,
+    /// Which audio tracks are being captured, once known.
+    audio: Mutex<Option<String>>,
+    audio_packets: AtomicU64,
 }
 
 impl SessionStats {
@@ -64,6 +70,16 @@ impl SessionStats {
         self.idle.load(Ordering::Relaxed)
     }
 
+    /// Which audio tracks are captured, e.g. "system + microphone", if any.
+    pub fn audio(&self) -> Option<String> {
+        self.audio.lock().ok().and_then(|value| value.clone())
+    }
+
+    /// Encoded audio packets currently held for a future clip.
+    pub fn audio_packets(&self) -> u64 {
+        self.audio_packets.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn record_dropped(&self) {
         self.dropped.fetch_add(1, Ordering::Relaxed);
     }
@@ -80,6 +96,63 @@ impl SessionStats {
             *value = Some(kind);
         }
     }
+
+    fn set_audio(&self, label: &str) {
+        if let Ok(mut value) = self.audio.lock() {
+            *value = Some(label.to_string());
+        }
+    }
+}
+
+/// Which audio sources to capture into the clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioConfig {
+    /// Loopback capture of the default playback device.
+    pub system: bool,
+    /// The default recording device.
+    pub microphone: bool,
+    /// Bits per second for each AAC track.
+    pub bitrate: u64,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            system: false,
+            microphone: false,
+            bitrate: 192_000,
+        }
+    }
+}
+
+impl AudioConfig {
+    /// The tracks to capture, in a stable order.
+    pub fn tracks(&self) -> Vec<AudioTrack> {
+        let mut tracks = Vec::new();
+        if self.system {
+            tracks.push(AudioTrack::System);
+        }
+        if self.microphone {
+            tracks.push(AudioTrack::Microphone);
+        }
+        tracks
+    }
+
+    /// Human-readable label, or `None` when audio is off.
+    pub fn label(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.system {
+            parts.push("system");
+        }
+        if self.microphone {
+            parts.push("microphone");
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" + "))
+        }
+    }
 }
 
 /// How the replay buffer should be encoded.
@@ -91,6 +164,8 @@ pub struct ReplayConfig {
     pub bitrate: u64,
     /// How many seconds of encoded video to retain.
     pub buffer_seconds: f64,
+    /// Which audio sources to capture alongside the video.
+    pub audio: AudioConfig,
 }
 
 impl Default for ReplayConfig {
@@ -100,6 +175,7 @@ impl Default for ReplayConfig {
             fps: 60,
             bitrate: 20_000_000,
             buffer_seconds: 60.0,
+            audio: AudioConfig::default(),
         }
     }
 }
@@ -121,11 +197,21 @@ enum Command {
     },
 }
 
+/// Per-track audio encoder and its slice of the replay buffer.
+struct AudioState {
+    track: AudioTrack,
+    encoder: Option<AudioEncoder>,
+    ring: Option<PacketRing>,
+    /// Set when the encoder could not be opened, so it is not retried per chunk.
+    failed: bool,
+}
+
 /// A running replay session.
 pub struct ReplaySession {
     commands: Sender<Command>,
     stop: Arc<AtomicBool>,
     capture: Option<CaptureHandle>,
+    audio: Vec<AudioCaptureHandle>,
     worker: Option<std::thread::JoinHandle<()>>,
     stats: Arc<SessionStats>,
 }
@@ -140,6 +226,26 @@ impl ReplaySession {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(SessionStats::default());
 
+        // One origin for both capture paths, so audio and video share a clock.
+        let origin = Instant::now();
+
+        // A single channel multiplexes every selected audio track's chunks. The
+        // worker keeps the sender alive so `recv` blocks instead of disconnecting
+        // when audio is off.
+        let (audio_tx, audio_rx) = bounded::<(AudioTrack, PcmChunk)>(512);
+        if let Some(label) = config.audio.label() {
+            stats.set_audio(&label);
+        }
+        let mut audio = Vec::new();
+        for track in config.audio.tracks() {
+            match audio::start_capture(track, audio_tx.clone(), origin) {
+                Ok(handle) => audio.push(handle),
+                Err(error) => {
+                    eprintln!("audio capture ({}) unavailable: {error:#}", track.label());
+                }
+            }
+        }
+
         let worker_dir = clips_dir.clone();
         let worker_stats = stats.clone();
         let fps = config.fps;
@@ -148,7 +254,15 @@ impl ReplaySession {
             .name("trace-encoder".into())
             .spawn(move || {
                 hw::set_current_thread_below_normal();
-                if let Err(error) = run(frame_rx, command_rx, config, worker_dir, worker_stats) {
+                if let Err(error) = run(
+                    frame_rx,
+                    command_rx,
+                    audio_rx,
+                    audio_tx,
+                    config,
+                    worker_dir,
+                    worker_stats,
+                ) {
                     eprintln!("encoder worker stopped: {error:#}");
                 }
             })?;
@@ -158,12 +272,14 @@ impl ReplaySession {
             stop.clone(),
             capture::CaptureConfig { fps, bitrate },
             stats.clone(),
+            origin,
         )?;
 
         Ok(Self {
             commands: command_tx,
             stop,
             capture: Some(capture),
+            audio,
             worker: Some(worker),
             stats,
         })
@@ -198,6 +314,9 @@ impl ReplaySession {
         if let Some(capture) = self.capture.take() {
             let _ = capture.stop();
         }
+        for handle in self.audio.drain(..) {
+            handle.stop();
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -209,6 +328,9 @@ impl ReplaySession {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(capture) = self.capture.take() {
             let _ = capture.stop();
+        }
+        for handle in self.audio.drain(..) {
+            handle.stop();
         }
 
         let (reply, result) = bounded(1);
@@ -233,16 +355,30 @@ impl Drop for ReplaySession {
     }
 }
 
-/// Encoder worker: consumes frames, fills the ring, and serves commands.
+/// Encoder worker: consumes video frames and audio chunks, fills the rings, and
+/// serves commands.
 fn run(
     frames: Receiver<CaptureMessage>,
     commands: Receiver<Command>,
+    audio: Receiver<(AudioTrack, PcmChunk)>,
+    _audio_keepalive: Sender<(AudioTrack, PcmChunk)>,
     config: ReplayConfig,
     clips_dir: PathBuf,
     stats: Arc<SessionStats>,
 ) -> Result<()> {
     let mut encoder: Option<VideoEncoder> = None;
     let mut ring: Option<PacketRing> = None;
+    let mut audio_states: Vec<AudioState> = config
+        .audio
+        .tracks()
+        .into_iter()
+        .map(|track| AudioState {
+            track,
+            encoder: None,
+            ring: None,
+            failed: false,
+        })
+        .collect();
 
     loop {
         select! {
@@ -289,17 +425,34 @@ fn run(
                 }
                 Err(_) => break,
             },
+            recv(audio) -> message => {
+                if let Ok((track, chunk)) = message {
+                    encode_audio(&mut audio_states, track, &chunk, &config, &stats);
+                }
+            },
             recv(commands) -> message => match message {
                 Ok(Command::Save { seconds, reply }) => {
-                    let _ = reply.send(save(&mut encoder, &mut ring, &clips_dir, seconds));
+                    let _ = reply.send(save(
+                        &mut encoder,
+                        &mut ring,
+                        &mut audio_states,
+                        &clips_dir,
+                        seconds,
+                    ));
                 }
                 Ok(Command::Finish { seconds, reply }) => {
-                    flush(&mut encoder, &mut ring, &stats);
-                    let _ = reply.send(save(&mut encoder, &mut ring, &clips_dir, seconds));
+                    flush(&mut encoder, &mut ring, &mut audio_states, &stats);
+                    let _ = reply.send(save(
+                        &mut encoder,
+                        &mut ring,
+                        &mut audio_states,
+                        &clips_dir,
+                        seconds,
+                    ));
                     break;
                 }
                 Ok(Command::Stop { reply }) => {
-                    flush(&mut encoder, &mut ring, &stats);
+                    flush(&mut encoder, &mut ring, &mut audio_states, &stats);
                     let _ = reply.send(Ok(()));
                     break;
                 }
@@ -311,7 +464,56 @@ fn run(
     Ok(())
 }
 
-fn flush(encoder: &mut Option<VideoEncoder>, ring: &mut Option<PacketRing>, stats: &SessionStats) {
+/// Encodes one device chunk into its track's ring, opening the encoder lazily
+/// once the device format is known.
+fn encode_audio(
+    states: &mut [AudioState],
+    track: AudioTrack,
+    chunk: &PcmChunk,
+    config: &ReplayConfig,
+    stats: &SessionStats,
+) {
+    let Some(state) = states.iter_mut().find(|state| state.track == track) else {
+        return;
+    };
+    if state.failed {
+        return;
+    }
+
+    if state.encoder.is_none() {
+        match AudioEncoder::new(chunk, config.audio.bitrate) {
+            Ok(encoder) => {
+                state.ring = Some(PacketRing::new(encoder.time_base(), config.buffer_seconds));
+                state.encoder = Some(encoder);
+            }
+            Err(error) => {
+                eprintln!("audio encoding ({}) unavailable: {error:#}", track.label());
+                state.failed = true;
+                return;
+            }
+        }
+    }
+
+    let (Some(encoder), Some(ring)) = (state.encoder.as_mut(), state.ring.as_mut()) else {
+        return;
+    };
+    match encoder.encode(chunk) {
+        Ok(packets) => {
+            for packet in packets {
+                ring.push(packet);
+                stats.audio_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Err(error) => eprintln!("audio encode error: {error:#}"),
+    }
+}
+
+fn flush(
+    encoder: &mut Option<VideoEncoder>,
+    ring: &mut Option<PacketRing>,
+    audio: &mut [AudioState],
+    stats: &SessionStats,
+) {
     if let (Some(encoder), Some(ring)) = (encoder.as_mut(), ring.as_mut()) {
         if let Ok(packets) = encoder.flush() {
             for packet in packets {
@@ -320,11 +522,23 @@ fn flush(encoder: &mut Option<VideoEncoder>, ring: &mut Option<PacketRing>, stat
             }
         }
     }
+    for state in audio.iter_mut() {
+        let (Some(encoder), Some(ring)) = (state.encoder.as_mut(), state.ring.as_mut()) else {
+            continue;
+        };
+        if let Ok(packets) = encoder.flush() {
+            for packet in packets {
+                ring.push(packet);
+                stats.audio_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 fn save(
     encoder: &mut Option<VideoEncoder>,
     ring: &mut Option<PacketRing>,
+    audio: &mut [AudioState],
     clips_dir: &Path,
     seconds: f64,
 ) -> Result<PathBuf> {
@@ -343,8 +557,39 @@ fn save(
     std::fs::create_dir_all(clips_dir)?;
     let path = clips_dir.join(format!("clip-{}.mp4", timestamp()));
     let time_base = ring.time_base();
-    let packets = ring.slice_mut(range);
-    mux::write_mp4(&path, encoder.inner(), time_base, packets)?;
+    let video_packets = ring.slice_mut(range);
+
+    // The clip's video window, so each audio track can be cut to match.
+    let start_pts = video_packets
+        .first()
+        .and_then(|packet| packet.pts())
+        .unwrap_or(0);
+    let end_pts = video_packets
+        .last()
+        .and_then(|packet| packet.pts())
+        .unwrap_or(i64::MAX);
+
+    let mut audio_streams: Vec<(&ffmpeg::encoder::audio::Encoder, &mut [ffmpeg::Packet])> =
+        Vec::new();
+    for state in audio.iter_mut() {
+        let (Some(audio_encoder), Some(audio_ring)) =
+            (state.encoder.as_ref(), state.ring.as_mut())
+        else {
+            continue;
+        };
+        let audio_range = audio_ring.range_for_window(start_pts, end_pts);
+        if audio_range.is_empty() {
+            continue;
+        }
+        audio_streams.push((audio_encoder.inner(), audio_ring.slice_mut(audio_range)));
+    }
+
+    mux::write_mp4(
+        &path,
+        (encoder.inner(), video_packets),
+        &mut audio_streams,
+        time_base,
+    )?;
     Ok(path)
 }
 

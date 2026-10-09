@@ -67,6 +67,40 @@ impl PacketRing {
         }
     }
 
+    /// Range of packets whose timestamps fall within `[start_pts, end_pts]`.
+    ///
+    /// Unlike [`snapshot_range`], this makes no keyframe assumption, so it is
+    /// safe for audio packets: it includes the last packet at or before the
+    /// start (for a gapless lead-in) and everything up to the end.
+    pub fn range_for_window(&self, start_pts: i64, end_pts: i64) -> Range<usize> {
+        if self.packets.is_empty() {
+            return 0..0;
+        }
+        let pts_of = |packet: &Packet| packet.pts().unwrap_or(0);
+
+        let mut start = self.packets.len();
+        for (index, packet) in self.packets.iter().enumerate() {
+            if pts_of(packet) <= start_pts {
+                start = index;
+            } else {
+                break;
+            }
+        }
+        if start >= self.packets.len() {
+            start = 0;
+        }
+
+        let mut end = start;
+        for (index, packet) in self.packets.iter().enumerate().skip(start) {
+            if pts_of(packet) <= end_pts {
+                end = index + 1;
+            } else {
+                break;
+            }
+        }
+        start..end
+    }
+
     /// Range of packets covering the last `seconds`, starting on a keyframe.
     pub fn snapshot_range(&self, seconds: f64) -> Range<usize> {
         if self.packets.is_empty() {

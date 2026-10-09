@@ -7,7 +7,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { Panel } from "../components/ui/Panel";
 import { Select } from "../components/ui/Select";
 import { Slider } from "../components/ui/Slider";
-import { api, type Settings, type Status } from "../lib/api";
+import { api, type AudioSource, type Settings, type Status } from "../lib/api";
 import type { Theme } from "../lib/theme";
 import type { Updater } from "../lib/updater";
 
@@ -111,6 +111,17 @@ export default function SettingsView({
                     {name}
                   </option>
                 ))}
+              </Select>
+
+              <Select
+                label="Audio source"
+                value={settings.audio_source}
+                onChange={(value) => update({ audio_source: value as AudioSource })}
+              >
+                <option value="off">Off</option>
+                <option value="system">System audio</option>
+                <option value="microphone">Microphone</option>
+                <option value="both">System + microphone</option>
               </Select>
 
               <div className="flex items-center gap-3">

@@ -9,6 +9,7 @@ export type Status = {
   packets: number;
   dropped: number;
   idle: number;
+  audio: string | null;
   buffer_seconds: number;
   fps: number;
   bitrate: number;
@@ -23,11 +24,14 @@ export type Clip = {
   modified_ms: number;
 };
 
+export type AudioSource = "off" | "system" | "microphone" | "both";
+
 export type Settings = {
   buffer_seconds: number;
   fps: number;
   bitrate: number;
   encoder: string | null;
+  audio_source: AudioSource;
 };
 
 export type Hotkeys = {

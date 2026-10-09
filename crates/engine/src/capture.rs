@@ -135,6 +135,7 @@ pub fn start_monitor_capture(
     stop: Arc<AtomicBool>,
     config: CaptureConfig,
     stats: Arc<SessionStats>,
+    origin: Instant,
 ) -> anyhow::Result<CaptureHandle> {
     let interval = Duration::from_micros(1_000_000 / config.fps.max(1) as u64);
 
@@ -162,7 +163,7 @@ pub fn start_monitor_capture(
             min_interval,
             dirty,
             ColorFormat::Bgra8,
-            (sink.clone(), stop.clone(), config, stats.clone()),
+            (sink.clone(), stop.clone(), config, stats.clone(), origin),
         );
 
         match FrameForwarder::start_free_threaded(settings) {
@@ -180,7 +181,8 @@ struct FrameForwarder {
     stop: Arc<AtomicBool>,
     stats: Arc<SessionStats>,
     config: CaptureConfig,
-    start: Instant,
+    /// Shared session clock, so video frames align with audio capture.
+    origin: Instant,
     interval: Duration,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -202,19 +204,25 @@ struct Pipeline {
 }
 
 impl GraphicsCaptureApiHandler for FrameForwarder {
-    type Flags = (Sender<CaptureMessage>, Arc<AtomicBool>, CaptureConfig, Arc<SessionStats>);
+    type Flags = (
+        Sender<CaptureMessage>,
+        Arc<AtomicBool>,
+        CaptureConfig,
+        Arc<SessionStats>,
+        Instant,
+    );
     type Error = BoxError;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         // Capture must never outrank the foreground; run below normal priority.
         hw::set_current_thread_below_normal();
-        let (sink, stop, config, stats) = ctx.flags;
+        let (sink, stop, config, stats, origin) = ctx.flags;
         Ok(Self {
             sink,
             stop,
             stats,
             config,
-            start: Instant::now(),
+            origin,
             interval: Duration::from_micros(1_000_000 / config.fps.max(1) as u64),
             device: ctx.device,
             context: ctx.device_context,
@@ -254,7 +262,7 @@ impl GraphicsCaptureApiHandler for FrameForwarder {
         }
         self.last_emit = Some(now);
 
-        let timestamp_micros = self.start.elapsed().as_micros() as i64;
+        let timestamp_micros = self.origin.elapsed().as_micros() as i64;
 
         if self.pipeline.is_none() {
             self.pipeline = Some(build_pipeline(&self.device, &self.context, self.config, frame)?);

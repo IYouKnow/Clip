@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use trace_engine::encode;
-use trace_engine::session::{ReplayConfig, ReplaySession, SessionStats};
+use trace_engine::session::{AudioConfig, ReplayConfig, ReplaySession, SessionStats};
 use trace_library::{self as library, ClipSummary};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -17,6 +17,42 @@ use hotkeys::{HotkeyAction, Hotkeys};
 /// Folder name under the user's Videos directory.
 const CLIPS_FOLDER: &str = "Trace";
 
+/// AAC bitrate used for each captured audio track.
+const AUDIO_BITRATE: u64 = 192_000;
+
+/// Which audio sources to capture into a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AudioSource {
+    Off,
+    System,
+    Microphone,
+    Both,
+}
+
+impl Default for AudioSource {
+    fn default() -> Self {
+        AudioSource::System
+    }
+}
+
+impl AudioSource {
+    /// Maps the user-facing choice onto the engine's capture flags.
+    fn config(self) -> AudioConfig {
+        let (system, microphone) = match self {
+            AudioSource::Off => (false, false),
+            AudioSource::System => (true, false),
+            AudioSource::Microphone => (false, true),
+            AudioSource::Both => (true, true),
+        };
+        AudioConfig {
+            system,
+            microphone,
+            bitrate: AUDIO_BITRATE,
+        }
+    }
+}
+
 /// User-configurable options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Settings {
@@ -26,6 +62,9 @@ struct Settings {
     bitrate: u64,
     /// Preferred encoder, or `None` to auto-select.
     encoder: Option<String>,
+    /// Which audio sources to capture.
+    #[serde(default)]
+    audio_source: AudioSource,
 }
 
 impl Default for Settings {
@@ -35,6 +74,7 @@ impl Default for Settings {
             fps: 60,
             bitrate: 20_000_000,
             encoder: None,
+            audio_source: AudioSource::default(),
         }
     }
 }
@@ -51,6 +91,8 @@ struct Status {
     dropped: u64,
     /// Frames skipped because the screen had not changed.
     idle: u64,
+    /// Active audio tracks (e.g. "system + microphone"), if any.
+    audio: Option<String>,
     buffer_seconds: u32,
     fps: u32,
     bitrate: u64,
@@ -124,6 +166,7 @@ impl AppState {
             packets: stats.map(SessionStats::packets).unwrap_or(0),
             dropped: stats.map(SessionStats::dropped).unwrap_or(0),
             idle: stats.map(SessionStats::idle).unwrap_or(0),
+            audio: stats.and_then(SessionStats::audio),
             buffer_seconds: settings.buffer_seconds,
             fps: settings.fps,
             bitrate: settings.bitrate,
@@ -155,6 +198,7 @@ fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, Strin
                 fps: settings.fps,
                 bitrate: settings.bitrate,
                 buffer_seconds: settings.buffer_seconds as f64,
+                audio: settings.audio_source.config(),
             };
 
             let started = ReplaySession::start(config, dir).map_err(|error| error.to_string())?;

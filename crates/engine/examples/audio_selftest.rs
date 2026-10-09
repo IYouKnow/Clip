@@ -17,8 +17,8 @@ const TONE_HZ: f32 = 1000.0;
 const TONE_SECONDS: u64 = 2;
 
 fn main() -> anyhow::Result<()> {
-    let (sender, receiver) = unbounded::<PcmChunk>();
-    let capture = audio::start_capture(AudioTrack::System, sender)?;
+    let (sender, receiver) = unbounded::<(AudioTrack, PcmChunk)>();
+    let capture = audio::start_capture(AudioTrack::System, sender, Instant::now())?;
 
     let renderer = std::thread::spawn(|| play_tone(Duration::from_secs(TONE_SECONDS)));
 
@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     let mut bytes = 0usize;
     let mut peak = 0f32;
     let mut format = None;
-    while let Ok(chunk) = receiver.try_recv() {
+    while let Ok((_, chunk)) = receiver.try_recv() {
         chunks += 1;
         bytes += chunk.data.len();
         format = Some((chunk.is_float, chunk.bits_per_sample));
