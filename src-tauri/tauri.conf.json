@@ -46,7 +46,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFGRkQxMzkxRTQwQTM2NDIKUldSQ05ncmtrUlA5SHk0SlhaZG9Udmc3VmxlMXAzRW55WHhWMkd3NjBTS1JpL2NZWDVzekt2cXAK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDQzk1OEIyQTM0OENBQjUKUldTMXlraWpzbGpKUEpsZW5HNXpmTmN6dE5USmV3RyttQXF1QlE5YitsRTk4bi9CejI1cGdpYUgK",
       "endpoints": [
         "https://github.com/IYouKnow/Clip/releases/latest/download/latest.json"
       ],
