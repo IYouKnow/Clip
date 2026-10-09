@@ -46,23 +46,33 @@ jobs:
           $v = $env:GITHUB_REF_NAME -replace '^v', ''
           node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')" $v
 
-      # The key is a single base64 line, but copying it can pick up stray
-      # newlines, which break base64 decoding. Strip whitespace and pass Tauri a
-      # file path so the secret's exact encoding stops mattering.
-      - name: Normalize signing key
+      # Copying the key or password can pick up stray whitespace, which breaks
+      # base64 decoding and the password check. Normalize both, and print only
+      # their lengths so a wrong value is distinguishable from an empty secret
+      # (a mistyped secret name) without leaking anything.
+      - name: Normalize signing secrets
         shell: pwsh
         env:
           RAW_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          RAW_SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $key = ($env:RAW_SIGNING_KEY -replace '\s', '')
-          $path = Join-Path $env:RUNNER_TEMP 'updater.key'
-          Set-Content -Path $path -Value $key -NoNewline -Encoding ascii
-          Add-Content -Path $env:GITHUB_ENV -Value "TAURI_SIGNING_PRIVATE_KEY=$path"
+          $password = ($env:RAW_SIGNING_PASSWORD -replace '[\r\n]', '')
+          Add-Content -Path $env:GITHUB_ENV -Value "TAURI_SIGNING_PRIVATE_KEY=$key"
+          Add-Content -Path $env:GITHUB_ENV -Value "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$password"
+          Write-Output "signing key: $($key.Length) chars; password: $($password.Length) chars"
+
+      # Fail in seconds when the key/password pair is wrong, rather than after
+      # a full release build.
+      - name: Verify signing key
+        shell: pwsh
+        run: |
+          Set-Content -Path "$env:RUNNER_TEMP\probe.txt" -Value 'probe' -NoNewline
+          pnpm tauri signer sign "$env:RUNNER_TEMP\probe.txt"
 
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Clipper23 ${{ github.ref_name }}"
