@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/AppShell";
 import { Sidebar } from "./components/Sidebar";
+import { UpdateBar } from "./components/UpdateBar";
 import { api, type Status } from "./lib/api";
 import type { View } from "./lib/nav";
 import { useSidebarCollapsed } from "./lib/sidebar";
@@ -67,6 +68,7 @@ export default function App() {
           onToggle={toggleSidebar}
         />
       }
+      bar={<UpdateBar updater={updater} />}
     >
       {view === "home" && (
         <Home status={status} pollError={error} onChanged={refresh} />

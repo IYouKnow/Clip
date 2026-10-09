@@ -3,6 +3,7 @@ import { Film, LoaderCircle, Play, Save, Square, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { CapturePreview } from "../components/CapturePreview";
 import { ClipThumbnail } from "../components/ClipThumbnail";
+import { WindowControls } from "../components/WindowControls";
 import { Banner } from "../components/ui/Banner";
 import { api, assetUrl, type Clip, type Status } from "../lib/api";
 import { cx } from "../lib/cx";
@@ -111,7 +112,11 @@ export default function Home({ status, pollError, onChanged }: Props) {
   const shownError = error ?? pollError;
 
   return (
-    <div className="flex flex-1 flex-col">
+    <div className="relative flex flex-1 flex-col">
+      <div data-tauri-drag-region="deep" className="absolute inset-x-0 top-0 h-9" />
+      <div className="absolute right-1.5 top-1 z-10">
+        <WindowControls />
+      </div>
       <div className="mx-auto my-auto flex w-full max-w-xl flex-col gap-5 px-6 py-8">
         {shownError && <Banner tone="error">{shownError}</Banner>}
 
