@@ -4,6 +4,7 @@
 
 pub mod audio;
 pub mod audio_encode;
+pub mod audio_mix;
 pub mod capture;
 pub mod encode;
 pub mod hw;

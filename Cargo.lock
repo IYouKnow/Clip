@@ -4486,6 +4486,7 @@ name = "trace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "serde",
  "serde_json",
  "tauri",

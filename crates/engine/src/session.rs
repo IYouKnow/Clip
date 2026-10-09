@@ -16,6 +16,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::audio::{self, AudioCaptureHandle, AudioTrack, PcmChunk};
 use crate::audio_encode::AudioEncoder;
+use crate::audio_mix::AudioMixer;
 use crate::capture::{
     self, CaptureHandle, CaptureMessage, CapturePath, CapturedData,
 };
@@ -204,6 +205,27 @@ struct AudioState {
     failed: bool,
 }
 
+/// The optional mixed (system + microphone) audio stream.
+struct MixState {
+    /// Both sources are enabled, so a mix is wanted.
+    enabled: bool,
+    /// Set when the mixer could not be created, to avoid retrying per chunk.
+    failed: bool,
+    mixer: Option<AudioMixer>,
+    ring: Option<PacketRing>,
+}
+
+impl MixState {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            failed: false,
+            mixer: None,
+            ring: None,
+        }
+    }
+}
+
 /// A running replay session.
 pub struct ReplaySession {
     commands: Sender<Command>,
@@ -379,7 +401,34 @@ fn run(
         })
         .collect();
 
+    // A combined track is only useful when there is more than one source.
+    let mut mix = MixState::new(config.audio.system && config.audio.microphone);
+
+    // Once capture ends the frame channel closes; the worker must keep serving
+    // commands (Stop/Finish) afterwards, or a `stop()` racing the close would
+    // wait forever for a reply that never comes.
+    let mut frames_open = true;
     loop {
+        if !frames_open {
+            match commands.recv() {
+                Ok(command) => {
+                    if handle_command(
+                        command,
+                        &mut encoder,
+                        &mut ring,
+                        &mut audio_states,
+                        &mut mix,
+                        &clips_dir,
+                        &stats,
+                    ) {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+            continue;
+        }
+
         select! {
             recv(frames) -> message => match message {
                 Ok(CaptureMessage::Setup(setup)) => {
@@ -422,38 +471,26 @@ fn run(
                         stats.packets.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                Err(_) => break,
+                Err(_) => frames_open = false,
             },
             recv(audio) -> message => {
                 if let Ok((track, chunk)) = message {
-                    encode_audio(&mut audio_states, track, &chunk, &config, &stats);
+                    encode_audio(&mut audio_states, track, &chunk, &config, &stats, &mut mix);
                 }
             },
             recv(commands) -> message => match message {
-                Ok(Command::Save { seconds, reply }) => {
-                    let _ = reply.send(save(
+                Ok(command) => {
+                    if handle_command(
+                        command,
                         &mut encoder,
                         &mut ring,
                         &mut audio_states,
+                        &mut mix,
                         &clips_dir,
-                        seconds,
-                    ));
-                }
-                Ok(Command::Finish { seconds, reply }) => {
-                    flush(&mut encoder, &mut ring, &mut audio_states, &stats);
-                    let _ = reply.send(save(
-                        &mut encoder,
-                        &mut ring,
-                        &mut audio_states,
-                        &clips_dir,
-                        seconds,
-                    ));
-                    break;
-                }
-                Ok(Command::Stop { reply }) => {
-                    flush(&mut encoder, &mut ring, &mut audio_states, &stats);
-                    let _ = reply.send(Ok(()));
-                    break;
+                        &stats,
+                    ) {
+                        break;
+                    }
                 }
                 Err(_) => break,
             },
@@ -463,47 +500,101 @@ fn run(
     Ok(())
 }
 
-/// Encodes one device chunk into its track's ring, opening the encoder lazily
-/// once the device format is known.
+/// Handles one worker command; returns `true` when the worker should stop.
+fn handle_command(
+    command: Command,
+    encoder: &mut Option<VideoEncoder>,
+    ring: &mut Option<PacketRing>,
+    audio: &mut [AudioState],
+    mix: &mut MixState,
+    clips_dir: &Path,
+    stats: &SessionStats,
+) -> bool {
+    match command {
+        Command::Save { seconds, reply } => {
+            let _ = reply.send(save(encoder, ring, audio, mix, clips_dir, seconds));
+            false
+        }
+        Command::Finish { seconds, reply } => {
+            flush(encoder, ring, audio, mix, stats);
+            let _ = reply.send(save(encoder, ring, audio, mix, clips_dir, seconds));
+            true
+        }
+        Command::Stop { reply } => {
+            flush(encoder, ring, audio, mix, stats);
+            let _ = reply.send(Ok(()));
+            true
+        }
+    }
+}
+
+/// Encodes one device chunk into its track's ring (and the mix), opening encoders
+/// lazily once the device format is known.
 fn encode_audio(
     states: &mut [AudioState],
     track: AudioTrack,
     chunk: &PcmChunk,
     config: &ReplayConfig,
     stats: &SessionStats,
+    mix: &mut MixState,
 ) {
-    let Some(state) = states.iter_mut().find(|state| state.track == track) else {
-        return;
-    };
-    if state.failed {
-        return;
-    }
-
-    if state.encoder.is_none() {
-        match AudioEncoder::new(chunk, config.audio.bitrate) {
-            Ok(encoder) => {
-                state.ring = Some(PacketRing::new(encoder.time_base(), config.buffer_seconds));
-                state.encoder = Some(encoder);
+    if let Some(state) = states.iter_mut().find(|state| state.track == track) {
+        if !state.failed {
+            if state.encoder.is_none() {
+                match AudioEncoder::new(chunk, config.audio.bitrate) {
+                    Ok(encoder) => {
+                        state.ring =
+                            Some(PacketRing::new(encoder.time_base(), config.buffer_seconds));
+                        state.encoder = Some(encoder);
+                    }
+                    Err(error) => {
+                        eprintln!("audio encoding ({}) unavailable: {error:#}", track.label());
+                        state.failed = true;
+                    }
+                }
             }
-            Err(error) => {
-                eprintln!("audio encoding ({}) unavailable: {error:#}", track.label());
-                state.failed = true;
-                return;
+
+            if let (Some(encoder), Some(ring)) = (state.encoder.as_mut(), state.ring.as_mut()) {
+                match encoder.encode(chunk) {
+                    Ok(packets) => {
+                        for packet in packets {
+                            ring.push(packet);
+                            stats.audio_packets.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Err(error) => eprintln!("audio encode error: {error:#}"),
+                }
             }
         }
     }
 
-    let (Some(encoder), Some(ring)) = (state.encoder.as_mut(), state.ring.as_mut()) else {
-        return;
-    };
-    match encoder.encode(chunk) {
-        Ok(packets) => {
-            for packet in packets {
-                ring.push(packet);
-                stats.audio_packets.fetch_add(1, Ordering::Relaxed);
+    // The mix is independent of the per-track encoders.
+    if mix.enabled && !mix.failed {
+        if mix.mixer.is_none() {
+            match AudioMixer::new(config.audio.bitrate) {
+                Ok(mixer) => {
+                    mix.ring = Some(PacketRing::new(mixer.time_base(), config.buffer_seconds));
+                    mix.mixer = Some(mixer);
+                }
+                Err(error) => {
+                    eprintln!("audio mix unavailable: {error:#}");
+                    mix.failed = true;
+                }
             }
         }
-        Err(error) => eprintln!("audio encode error: {error:#}"),
+        if let Some(mixer) = mix.mixer.as_mut() {
+            match mixer.push(track, chunk) {
+                Ok(packets) => {
+                    if let Some(ring) = mix.ring.as_mut() {
+                        for packet in packets {
+                            ring.push(packet);
+                            stats.audio_packets.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                Err(error) => eprintln!("audio mix error: {error:#}"),
+            }
+        }
     }
 }
 
@@ -511,6 +602,7 @@ fn flush(
     encoder: &mut Option<VideoEncoder>,
     ring: &mut Option<PacketRing>,
     audio: &mut [AudioState],
+    mix: &mut MixState,
     stats: &SessionStats,
 ) {
     if let (Some(encoder), Some(ring)) = (encoder.as_mut(), ring.as_mut()) {
@@ -532,12 +624,23 @@ fn flush(
             }
         }
     }
+    if let Some(mixer) = mix.mixer.as_mut() {
+        if let Ok(packets) = mixer.flush() {
+            if let Some(ring) = mix.ring.as_mut() {
+                for packet in packets {
+                    ring.push(packet);
+                    stats.audio_packets.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 fn save(
     encoder: &mut Option<VideoEncoder>,
     ring: &mut Option<PacketRing>,
     audio: &mut [AudioState],
+    mix: &mut MixState,
     clips_dir: &Path,
     seconds: f64,
 ) -> Result<PathBuf> {
@@ -570,6 +673,15 @@ fn save(
 
     let mut audio_streams: Vec<(&ffmpeg::encoder::audio::Encoder, &mut [ffmpeg::Packet])> =
         Vec::new();
+
+    // The mixed track goes first, so players default to the combined audio.
+    if let (Some(mixer), Some(mix_ring)) = (mix.mixer.as_ref(), mix.ring.as_mut()) {
+        let mix_range = mix_ring.range_for_window(start_pts, end_pts);
+        if !mix_range.is_empty() {
+            audio_streams.push((mixer.inner(), mix_ring.slice_mut(mix_range)));
+        }
+    }
+
     for state in audio.iter_mut() {
         let (Some(audio_encoder), Some(audio_ring)) =
             (state.encoder.as_ref(), state.ring.as_mut())

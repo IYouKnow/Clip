@@ -64,6 +64,40 @@ pub struct PcmChunk {
     pub timestamp_micros: i64,
 }
 
+impl PcmChunk {
+    /// Peak absolute amplitude in `0.0..=1.0`, for a level meter.
+    ///
+    /// Decodes the device's own sample format (float32, int16 or int32).
+    pub fn peak(&self) -> f32 {
+        let bytes_per_sample = (self.bits_per_sample / 8).max(1) as usize;
+        let mut peak = 0.0f32;
+        match (self.is_float, bytes_per_sample) {
+            (true, 4) => {
+                for sample in self.data.chunks_exact(4) {
+                    let value = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+                    peak = peak.max(value.abs());
+                }
+            }
+            (false, 2) => {
+                for sample in self.data.chunks_exact(2) {
+                    let value = i16::from_le_bytes([sample[0], sample[1]]) as f32 / i16::MAX as f32;
+                    peak = peak.max(value.abs());
+                }
+            }
+            (false, 4) => {
+                for sample in self.data.chunks_exact(4) {
+                    let value =
+                        i32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]) as f32
+                            / i32::MAX as f32;
+                    peak = peak.max(value.abs());
+                }
+            }
+            _ => {}
+        }
+        peak
+    }
+}
+
 /// Handle to a running capture thread.
 pub struct AudioCaptureHandle {
     stop: Arc<AtomicBool>,

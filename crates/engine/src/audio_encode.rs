@@ -1,9 +1,9 @@
 //! AAC encoding of captured PCM for the clip audio tracks.
 //!
-//! Each audio source is encoded on its own instance: raw device PCM (whatever
-//! the mix format is) is resampled to planar f32 at 48 kHz stereo, reframed to
-//! the AAC frame size, and encoded. Packets are stamped with the same
-//! microsecond time base as the video encoder, so the muxer can interleave them.
+//! Raw device PCM (whatever the mix format is) is resampled to planar f32 at
+//! 48 kHz stereo, reframed to the AAC frame size, and encoded. Packets are
+//! stamped with the same microsecond time base as the video encoder, so the
+//! muxer can interleave them.
 
 use std::collections::VecDeque;
 
@@ -17,37 +17,25 @@ use crate::audio::PcmChunk;
 use crate::encode::MICROS;
 
 /// AAC-LC frame size, in samples per channel.
-const FRAME_SAMPLES: usize = 1024;
+pub const FRAME_SAMPLES: usize = 1024;
 
 /// Everything is resampled to this rate before encoding.
-const OUTPUT_RATE: u32 = 48_000;
+pub const OUTPUT_RATE: u32 = 48_000;
 
 /// Stereo output.
-const OUTPUT_CHANNELS: u16 = 2;
+pub const OUTPUT_CHANNELS: u16 = 2;
 
-/// Encodes one audio source to AAC packets.
-pub struct AudioEncoder {
-    encoder: ffmpeg::encoder::audio::Encoder,
+/// Resamples a device's PCM to planar f32 at 48 kHz stereo.
+pub struct PcmConverter {
     resampler: ffmpeg::software::resampling::Context,
     src_format: Sample,
     src_layout: ChannelLayout,
     src_rate: u32,
-    /// Planar f32 accumulation, one buffer per output channel.
-    buffers: Vec<Vec<f32>>,
-    /// Frames already handed to the encoder, for timestamping.
-    emitted_samples: u64,
-    /// Timestamps of submitted frames, consumed one per emitted packet (the
-    /// encoder buffers internally, exactly like the video encoder).
-    pending: VecDeque<i64>,
-    next_pts: i64,
-    base_pts: i64,
-    started: bool,
 }
 
-impl AudioEncoder {
-    /// Opens an AAC encoder matching the format of `first` (the first chunk
-    /// from the device).
-    pub fn new(first: &PcmChunk, bitrate: u64) -> Result<Self> {
+impl PcmConverter {
+    /// Builds a converter matching the format of `first` (a chunk from a device).
+    pub fn new(first: &PcmChunk) -> Result<Self> {
         ffmpeg::init()?;
 
         let src_format = match (first.is_float, first.bits_per_sample) {
@@ -58,60 +46,32 @@ impl AudioEncoder {
         };
         let src_layout = ChannelLayout::default(first.channels as i32);
 
-        let dst_format = Sample::F32(Type::Planar);
-        let dst_layout = ChannelLayout::default(OUTPUT_CHANNELS as i32);
-
-        let codec = ffmpeg::encoder::find_by_name("aac")
-            .ok_or_else(|| anyhow!("AAC encoder is not available in this FFmpeg build"))?;
-
-        let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
-        context.set_time_base(ffmpeg::Rational(1, MICROS));
-
-        let mut audio = context.encoder().audio()?;
-        audio.set_rate(OUTPUT_RATE as i32);
-        audio.set_channel_layout(dst_layout);
-        audio.set_format(dst_format);
-        audio.set_bit_rate(bitrate as usize);
-        audio.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
-        let encoder = audio.open_with(ffmpeg::Dictionary::new())?;
-
         let resampler = ffmpeg::software::resampling::Context::get(
             src_format,
             src_layout,
             first.sample_rate,
-            dst_format,
-            dst_layout,
+            Sample::F32(Type::Planar),
+            ChannelLayout::default(OUTPUT_CHANNELS as i32),
             OUTPUT_RATE,
         )
         .context("creating the audio resampler")?;
 
         Ok(Self {
-            encoder,
             resampler,
             src_format,
             src_layout,
             src_rate: first.sample_rate.max(1),
-            buffers: vec![Vec::new(), Vec::new()],
-            emitted_samples: 0,
-            pending: VecDeque::new(),
-            next_pts: 0,
-            base_pts: first.timestamp_micros,
-            started: false,
         })
     }
 
-    /// Encodes one device chunk, returning whatever packets are ready.
-    pub fn encode(&mut self, chunk: &PcmChunk) -> Result<Vec<Packet>> {
-        if !self.started {
-            self.base_pts = chunk.timestamp_micros;
-            self.started = true;
-        }
-
+    /// Converts one device chunk, appending planar f32 samples to `out` (one
+    /// buffer per output channel). Returns the samples appended per channel.
+    pub fn convert(&mut self, chunk: &PcmChunk, out: &mut [Vec<f32>; 2]) -> Result<usize> {
         let bytes_per_sample = (chunk.bits_per_sample / 8).max(1) as usize;
         let frame_samples =
             chunk.data.len() / (chunk.channels as usize * bytes_per_sample).max(1);
         if frame_samples == 0 {
-            return Ok(Vec::new());
+            return Ok(0);
         }
 
         // Wrap the raw device PCM in an input frame.
@@ -135,16 +95,77 @@ impl AudioEncoder {
         self.resampler.run(&input, &mut output)?;
 
         let produced = output.samples();
-        for channel in 0..OUTPUT_CHANNELS as usize {
+        for channel in 0..2 {
             let plane = output.data(channel);
-            let buffer = &mut self.buffers[channel];
-            buffer.extend(
+            out[channel].extend(
                 plane
                     .chunks_exact(4)
                     .take(produced)
                     .map(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
             );
         }
+        Ok(produced)
+    }
+}
+
+/// Encodes one audio source to AAC packets.
+pub struct AudioEncoder {
+    encoder: ffmpeg::encoder::audio::Encoder,
+    converter: PcmConverter,
+    /// Planar f32 accumulation, one buffer per output channel.
+    buffers: [Vec<f32>; 2],
+    /// Frames already handed to the encoder, for timestamping.
+    emitted_samples: u64,
+    /// Timestamps of submitted frames, consumed one per emitted packet (the
+    /// encoder buffers internally, exactly like the video encoder).
+    pending: VecDeque<i64>,
+    next_pts: i64,
+    base_pts: i64,
+    started: bool,
+}
+
+impl AudioEncoder {
+    /// Opens an AAC encoder matching the format of `first` (the first chunk
+    /// from the device).
+    pub fn new(first: &PcmChunk, bitrate: u64) -> Result<Self> {
+        ffmpeg::init()?;
+
+        let codec = ffmpeg::encoder::find_by_name("aac")
+            .ok_or_else(|| anyhow!("AAC encoder is not available in this FFmpeg build"))?;
+
+        let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
+        context.set_time_base(ffmpeg::Rational(1, MICROS));
+
+        let mut audio = context.encoder().audio()?;
+        audio.set_rate(OUTPUT_RATE as i32);
+        audio.set_channel_layout(ChannelLayout::default(OUTPUT_CHANNELS as i32));
+        audio.set_format(Sample::F32(Type::Planar));
+        audio.set_bit_rate(bitrate as usize);
+        audio.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
+        let encoder = audio.open_with(ffmpeg::Dictionary::new())?;
+
+        let converter = PcmConverter::new(first)?;
+
+        Ok(Self {
+            encoder,
+            converter,
+            buffers: [Vec::new(), Vec::new()],
+            emitted_samples: 0,
+            pending: VecDeque::new(),
+            next_pts: 0,
+            base_pts: first.timestamp_micros,
+            started: false,
+        })
+    }
+
+    /// Encodes one device chunk, returning whatever packets are ready.
+    pub fn encode(&mut self, chunk: &PcmChunk) -> Result<Vec<Packet>> {
+        if !self.started {
+            self.base_pts = chunk.timestamp_micros;
+            self.started = true;
+        }
+
+        self.converter.convert(chunk, &mut self.buffers)?;
 
         let mut packets = Vec::new();
         while self.buffers[0].len() >= FRAME_SAMPLES {
@@ -177,7 +198,7 @@ impl AudioEncoder {
         frame.set_rate(OUTPUT_RATE);
         frame.set_pts(Some(pts));
 
-        for channel in 0..OUTPUT_CHANNELS as usize {
+        for channel in 0..2 {
             let buffer = &mut self.buffers[channel];
             // Pad only when there is not enough for a full frame (the trailing
             // frame); never truncate, or samples from a previous chunk are lost.

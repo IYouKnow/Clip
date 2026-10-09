@@ -26,5 +26,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+crossbeam-channel.workspace = true
 trace-engine = { path = "../crates/engine" }
 trace-library = { path = "../crates/library" }

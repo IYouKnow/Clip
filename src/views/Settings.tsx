@@ -1,4 +1,4 @@
-import { Download, FolderOpen, RefreshCw } from "lucide-react";
+import { Download, FolderOpen, Mic, RefreshCw, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { Banner } from "../components/ui/Banner";
@@ -11,6 +11,7 @@ import {
   api,
   type AudioDevices,
   type AudioSource,
+  type MicTestStatus,
   type Settings,
   type Status,
 } from "../lib/api";
@@ -37,6 +38,8 @@ export default function SettingsView({
   const [version, setVersion] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [micTest, setMicTest] = useState<MicTestStatus | null>(null);
+  const [testBusy, setTestBusy] = useState(false);
 
   useEffect(() => {
     api
@@ -53,6 +56,23 @@ export default function SettingsView({
       .catch(() => {});
   }, []);
 
+  // Poll the live level while a microphone test is running.
+  useEffect(() => {
+    if (!micTest?.active) return;
+    const timer = setInterval(() => {
+      api.micTestStatus().then(setMicTest).catch(() => {});
+    }, 100);
+    return () => clearInterval(timer);
+  }, [micTest?.active]);
+
+  // Stop the test when leaving the page.
+  useEffect(
+    () => () => {
+      api.stopMicTest().catch(() => {});
+    },
+    [],
+  );
+
   function update(patch: Partial<Settings>) {
     setSettings((current) => (current ? { ...current, ...patch } : current));
     setSaved(false);
@@ -68,6 +88,27 @@ export default function SettingsView({
     } catch (caught) {
       setError(String(caught));
     }
+  }
+
+  async function startTest() {
+    setTestBusy(true);
+    setError(null);
+    try {
+      setMicTest(await api.startMicTest(settings?.microphone_device ?? null));
+    } catch (caught) {
+      setError(String(caught));
+    } finally {
+      setTestBusy(false);
+    }
+  }
+
+  async function stopTest() {
+    try {
+      await api.stopMicTest();
+    } catch {
+      /* ignore */
+    }
+    setMicTest(null);
   }
 
   const encoders = status?.available_encoders ?? [];
@@ -178,6 +219,61 @@ export default function SettingsView({
               </div>
             </div>
           )}
+        </Panel>
+
+        <Panel title="Microphone test">
+          <div className="flex flex-col gap-3">
+            <p className="text-[13px] text-ink-muted">
+              Check that the selected microphone hears you — this uses the same capture
+              path as clips.
+            </p>
+
+            <div className="flex flex-wrap items-center gap-3">
+              {micTest?.active ? (
+                <Button
+                  variant="secondary"
+                  icon={<Square className="size-3.5" />}
+                  onClick={stopTest}
+                >
+                  Stop test
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  loading={testBusy}
+                  icon={<Mic className="size-3.5" />}
+                  onClick={startTest}
+                >
+                  Test microphone
+                </Button>
+              )}
+              {micTest?.device && (
+                <span className="text-[12px] text-ink-faint">{micTest.device}</span>
+              )}
+            </div>
+
+            {micTest?.active && (
+              <div className="flex flex-col gap-1.5">
+                <div className="h-2 overflow-hidden rounded-full bg-elevated">
+                  <div
+                    className="h-full rounded-full bg-accent transition-[width] duration-75"
+                    style={{
+                      width: `${Math.min(100, Math.round((micTest.level ?? 0) * 100))}%`,
+                    }}
+                  />
+                </div>
+                <p className="text-[12px] text-ink-faint">
+                  {micTest.peak > 0.01
+                    ? "Signal detected"
+                    : "Listening… speak or tap the microphone"}
+                </p>
+              </div>
+            )}
+
+            <p className="text-[12px] text-ink-faint">
+              Pick a device above, then Save settings so clips use it.
+            </p>
+          </div>
         </Panel>
 
         <Panel title="Appearance">

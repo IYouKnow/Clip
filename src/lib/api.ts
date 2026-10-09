@@ -41,6 +41,13 @@ export type AudioDevices = {
   microphone: DeviceInfo[];
 };
 
+export type MicTestStatus = {
+  active: boolean;
+  level: number;
+  peak: number;
+  device: string | null;
+};
+
 export type Settings = {
   buffer_seconds: number;
   fps: number;
@@ -70,6 +77,10 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
   listAudioDevices: () => invoke<AudioDevices>("list_audio_devices"),
+  startMicTest: (deviceId: string | null) =>
+    invoke<MicTestStatus>("start_mic_test", { deviceId }),
+  stopMicTest: () => invoke<void>("stop_mic_test"),
+  micTestStatus: () => invoke<MicTestStatus>("mic_test_status"),
 
   getHotkeys: () => invoke<Hotkeys>("get_hotkeys"),
   setHotkeys: (hotkeys: Hotkeys) => invoke<void>("set_hotkeys", { hotkeys }),

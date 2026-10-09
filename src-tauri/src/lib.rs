@@ -1,9 +1,12 @@
 //! Tauri shell: exposes the replay engine and clip library to the UI.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use trace_engine::audio::{self, AudioTrack, DeviceInfo};
+use crossbeam_channel::unbounded;
+use trace_engine::audio::{self, AudioCaptureHandle, AudioTrack, DeviceInfo, PcmChunk};
 use trace_engine::encode;
 use trace_engine::session::{AudioConfig, ReplayConfig, ReplaySession, SessionStats};
 use trace_library::{self as library, ClipSummary};
@@ -124,6 +127,28 @@ struct Status {
     available_encoders: Vec<String>,
 }
 
+/// A running microphone test: a capture handle plus the level readouts.
+struct MicTest {
+    handle: AudioCaptureHandle,
+    consumer: Option<std::thread::JoinHandle<()>>,
+    /// Peak since the last status poll (f32 bits), so the meter is peak-hold.
+    level: Arc<AtomicU32>,
+    /// Peak over the whole test (f32 bits).
+    peak: Arc<AtomicU32>,
+    device: String,
+}
+
+/// Microphone-test level reported to the settings UI.
+#[derive(Debug, Clone, Serialize)]
+struct MicTestStatus {
+    active: bool,
+    /// Peak over the poll interval, 0.0..=1.0.
+    level: f32,
+    /// Peak over the whole test, 0.0..=1.0.
+    peak: f32,
+    device: Option<String>,
+}
+
 struct AppState {
     session: Mutex<Option<ReplaySession>>,
     stats: Mutex<Option<Arc<SessionStats>>>,
@@ -135,6 +160,8 @@ struct AppState {
     hotkeys: Mutex<Hotkeys>,
     /// Currently registered accelerators and the action each one fires.
     bindings: Mutex<Vec<(Shortcut, HotkeyAction)>>,
+    /// The running microphone test, if any.
+    mic_test: Mutex<Option<MicTest>>,
 }
 
 fn clips_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -419,6 +446,111 @@ async fn list_audio_devices() -> AudioDevices {
     }
 }
 
+/// Friendly name of the microphone the test will open; falls back to the id.
+fn mic_test_device_name(device_id: Option<&str>) -> String {
+    match device_id {
+        Some(id) => audio::list_devices(AudioTrack::Microphone)
+            .ok()
+            .and_then(|devices| devices.into_iter().find(|device| device.id == id))
+            .map(|device| device.name)
+            .unwrap_or_else(|| id.to_string()),
+        None => audio::default_device_info(AudioTrack::Microphone)
+            .map(|device| device.name)
+            .unwrap_or_else(|_| "System default".to_string()),
+    }
+}
+
+/// Stops the running microphone test, if any.
+fn stop_mic_test_inner(state: &AppState) {
+    let taken = state.mic_test.lock().ok().and_then(|mut current| current.take());
+    if let Some(test) = taken {
+        test.handle.stop();
+        if let Some(consumer) = test.consumer {
+            let _ = consumer.join();
+        }
+    }
+}
+
+/// Starts (or restarts) a microphone level test on the chosen endpoint.
+#[tauri::command]
+fn start_mic_test(
+    state: State<'_, AppState>,
+    device_id: Option<String>,
+) -> Result<MicTestStatus, String> {
+    stop_mic_test_inner(&state);
+
+    let (sender, receiver) = unbounded::<(AudioTrack, PcmChunk)>();
+    let handle = audio::start_capture(
+        AudioTrack::Microphone,
+        sender,
+        Instant::now(),
+        device_id.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let level = Arc::new(AtomicU32::new(0));
+    let peak = Arc::new(AtomicU32::new(0));
+    let consumer = {
+        let level = level.clone();
+        let peak = peak.clone();
+        std::thread::Builder::new()
+            .name("trace-mic-test".into())
+            .spawn(move || {
+                // Keep draining so the capture thread never blocks on send.
+                while let Ok((_, chunk)) = receiver.recv() {
+                    let bits = chunk.peak().to_bits();
+                    level.fetch_max(bits, Ordering::Relaxed);
+                    peak.fetch_max(bits, Ordering::Relaxed);
+                }
+            })
+            .map_err(|error| error.to_string())?
+    };
+
+    let device = mic_test_device_name(device_id.as_deref());
+    if let Ok(mut current) = state.mic_test.lock() {
+        *current = Some(MicTest {
+            handle,
+            consumer: Some(consumer),
+            level,
+            peak,
+            device: device.clone(),
+        });
+    }
+
+    Ok(MicTestStatus {
+        active: true,
+        level: 0.0,
+        peak: 0.0,
+        device: Some(device),
+    })
+}
+
+/// Stops the microphone test if one is running.
+#[tauri::command]
+fn stop_mic_test(state: State<'_, AppState>) {
+    stop_mic_test_inner(&state);
+}
+
+/// Reports the running test's level, resetting the per-poll peak.
+#[tauri::command]
+fn mic_test_status(state: State<'_, AppState>) -> MicTestStatus {
+    let guard = state.mic_test.lock().ok();
+    match guard.as_ref().and_then(|current| current.as_ref()) {
+        Some(test) => MicTestStatus {
+            active: true,
+            level: f32::from_bits(test.level.swap(0, Ordering::Relaxed)),
+            peak: f32::from_bits(test.peak.load(Ordering::Relaxed)),
+            device: Some(test.device.clone()),
+        },
+        None => MicTestStatus {
+            active: false,
+            level: 0.0,
+            peak: 0.0,
+            device: None,
+        },
+    }
+}
+
 #[tauri::command]
 async fn get_status(state: State<'_, AppState>, app: AppHandle) -> Result<Status, String> {
     Ok(state.status(&app))
@@ -521,6 +653,7 @@ pub fn run() {
             encoders: Mutex::new(None),
             hotkeys: Mutex::new(Hotkeys::default()),
             bindings: Mutex::new(Vec::new()),
+            mic_test: Mutex::new(None),
         })
         .setup(|app| {
             let handle = app.handle().clone();
@@ -554,6 +687,9 @@ pub fn run() {
             set_hotkeys,
             set_hotkeys_suspended,
             list_audio_devices,
+            start_mic_test,
+            stop_mic_test,
+            mic_test_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

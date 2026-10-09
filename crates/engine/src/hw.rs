@@ -47,8 +47,8 @@ pub const BIND_SHADER_RESOURCE: u32 = 0x0000_0008;
 /// Drivers differ: some want both flags, some only render-target, and the
 /// original build shipped shader-resource alone.
 pub const BIND_CANDIDATES: &[u32] = &[
-    BIND_RENDER_TARGET | BIND_SHADER_RESOURCE,
     BIND_RENDER_TARGET,
+    BIND_RENDER_TARGET | BIND_SHADER_RESOURCE,
     BIND_SHADER_RESOURCE,
 ];
 
@@ -247,7 +247,9 @@ impl HwFrames {
             (*frames_ctx).initial_pool_size = pool as i32;
 
             let hw = (*frames_ctx).hwctx as *mut ffi::AVD3D11VAFramesContext;
-            (*hw).texture = texture.as_raw() as *mut ffi::ID3D11Texture2D;
+            let owned_texture = texture.clone();
+            (*hw).texture = owned_texture.as_raw() as *mut ffi::ID3D11Texture2D;
+            std::mem::forget(owned_texture);
             (*hw).BindFlags = bind_flags;
             (*hw).MiscFlags = 0;
         }
