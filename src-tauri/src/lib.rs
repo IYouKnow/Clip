@@ -77,6 +77,9 @@ struct AudioDevices {
 /// User-configurable options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Settings {
+    /// Start capturing automatically when the app launches.
+    #[serde(default)]
+    auto_start: bool,
     /// Seconds of video kept in the replay buffer.
     buffer_seconds: u32,
     fps: u32,
@@ -97,6 +100,7 @@ struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            auto_start: false,
             buffer_seconds: 60,
             fps: 60,
             bitrate: 20_000_000,
@@ -662,6 +666,20 @@ pub fn run() {
             }
             if let Err(error) = tray::build(&handle) {
                 eprintln!("failed to create tray icon: {error}");
+            }
+
+            // Optionally begin capturing at launch, off the setup path so opening
+            // the window is not held up by encoder/GPU startup.
+            if state.settings.lock().map(|settings| settings.auto_start).unwrap_or(false) {
+                let auto = handle.clone();
+                let _ = std::thread::Builder::new()
+                    .name("trace-auto-start".into())
+                    .spawn(move || {
+                        let state = auto.state::<AppState>();
+                        if let Err(error) = start_replay_inner(&auto, &state) {
+                            eprintln!("failed to auto-start replay: {error}");
+                        }
+                    });
             }
             Ok(())
         })

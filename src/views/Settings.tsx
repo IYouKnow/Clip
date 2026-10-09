@@ -7,6 +7,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { Panel } from "../components/ui/Panel";
 import { Select } from "../components/ui/Select";
 import { Slider } from "../components/ui/Slider";
+import { Switch } from "../components/ui/Switch";
 import {
   api,
   type AudioDevices,
@@ -210,6 +211,13 @@ export default function SettingsView({
               {status?.replaying && status.audio && (
                 <p className="text-[12px] text-ink-faint">Recording: {status.audio}</p>
               )}
+
+              <Switch
+                label="Start recording on launch"
+                description="Begin capturing automatically whenever Trace starts."
+                checked={settings.auto_start}
+                onChange={(value) => update({ auto_start: value })}
+              />
 
               <div className="flex items-center gap-3">
                 <Button variant="primary" onClick={save}>
