@@ -4,6 +4,7 @@ import { Sidebar } from "./components/Sidebar";
 import { api, type Status } from "./lib/api";
 import type { View } from "./lib/nav";
 import { useTheme } from "./lib/theme";
+import { useUpdater } from "./lib/updater";
 import Home from "./views/Home";
 import Hotkeys from "./views/Hotkeys";
 import Library from "./views/Library";
@@ -14,6 +15,7 @@ export default function App() {
   const [view, setView] = useState<View>("home");
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const updater = useUpdater();
 
   const refresh = useCallback(async () => {
     try {
@@ -32,6 +34,11 @@ export default function App() {
     const timer = setInterval(refresh, 1000);
     return () => clearInterval(timer);
   }, [refresh]);
+
+  // Check for a new release once at startup; the result lights up Settings.
+  useEffect(() => {
+    updater.check({ silent: true });
+  }, [updater.check]);
 
   return (
     <AppShell
@@ -55,6 +62,7 @@ export default function App() {
           theme={theme}
           onThemeChange={setTheme}
           onSaved={refresh}
+          updater={updater}
         />
       )}
       {view === "hotkeys" && <Hotkeys />}

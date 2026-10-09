@@ -31,13 +31,28 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true,
+    "resources": {
+      "resources/ffmpeg/": ""
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFGRkQxMzkxRTQwQTM2NDIKUldSQ05ncmtrUlA5SHk0SlhaZG9Udmc3VmxlMXAzRW55WHhWMkd3NjBTS1JpL2NZWDVzekt2cXAK",
+      "endpoints": [
+        "https://github.com/IYouKnow/Clip/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

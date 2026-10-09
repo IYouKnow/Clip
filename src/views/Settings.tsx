@@ -1,4 +1,4 @@
-import { FolderOpen } from "lucide-react";
+import { Download, FolderOpen, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { Banner } from "../components/ui/Banner";
@@ -9,16 +9,25 @@ import { Select } from "../components/ui/Select";
 import { Slider } from "../components/ui/Slider";
 import { api, type Settings, type Status } from "../lib/api";
 import type { Theme } from "../lib/theme";
+import type { Updater } from "../lib/updater";
 
 type Props = {
   status: Status | null;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   onSaved: () => void;
+  updater: Updater;
 };
 
-export default function SettingsView({ status, theme, onThemeChange, onSaved }: Props) {
+export default function SettingsView({
+  status,
+  theme,
+  onThemeChange,
+  onSaved,
+  updater,
+}: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,6 +36,10 @@ export default function SettingsView({ status, theme, onThemeChange, onSaved }: 
       .getSettings()
       .then(setSettings)
       .catch((caught) => setError(String(caught)));
+    api
+      .getVersion()
+      .then(setVersion)
+      .catch(() => {});
   }, []);
 
   function update(patch: Partial<Settings>) {
@@ -131,6 +144,53 @@ export default function SettingsView({ status, theme, onThemeChange, onSaved }: 
             >
               Open folder
             </Button>
+          </div>
+        </Panel>
+
+        <Panel title="Updates">
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-4">
+              <p className="text-[13px] text-ink-muted">
+                Clipper23 {version ?? "…"}
+              </p>
+              <Button
+                size="sm"
+                icon={<RefreshCw className="size-3.5" />}
+                loading={updater.phase === "checking"}
+                onClick={() => updater.check()}
+              >
+                Check for updates
+              </Button>
+            </div>
+
+            {(updater.phase === "available" ||
+              updater.phase === "downloading" ||
+              updater.phase === "ready") && (
+              <Banner tone="info">
+                <div className="flex flex-col gap-2">
+                  <span>Version {updater.version} is available.</span>
+                  {updater.notes && (
+                    <span className="line-clamp-3 text-ink-muted">{updater.notes}</span>
+                  )}
+                  <div>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      icon={<Download className="size-3.5" />}
+                      loading={updater.phase === "downloading"}
+                      disabled={updater.phase !== "available"}
+                      onClick={() => updater.install()}
+                    >
+                      {updater.phase === "downloading"
+                        ? `Updating… ${updater.progress ?? 0}%`
+                        : "Update & restart"}
+                    </Button>
+                  </div>
+                </div>
+              </Banner>
+            )}
+
+            {updater.phase === "error" && <Banner tone="error">{updater.error}</Banner>}
           </div>
         </Panel>
       </div>

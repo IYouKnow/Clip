@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 
 export type Status = {
   replaying: boolean;
@@ -42,6 +43,8 @@ export const api = {
 
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
+
+  getVersion: () => getVersion(),
 };
 
 /// Turns an absolute path into a URL the webview can load.

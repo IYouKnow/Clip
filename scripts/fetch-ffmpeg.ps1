@@ -32,8 +32,18 @@ $dest = Join-Path $repoRoot "third_party\ffmpeg"
 $asset = "ffmpeg-${Version}_$Variant.zip"
 $url = "https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/ffmpeg-$Version/$asset"
 
+# The bundler ships these DLLs next to the executable (bundle.resources in
+# tauri.conf.json), so mirror the FFmpeg bin directory there.
+$bundleDir = Join-Path $repoRoot "src-tauri\resources\ffmpeg"
+
+function Sync-BundleResources {
+    New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+    Copy-Item -Force -Path (Join-Path $dest "bin\*.dll") -Destination $bundleDir
+}
+
 if (Test-Path (Join-Path $dest "include\libavcodec\avcodec.h")) {
     Write-Host "FFmpeg $Version already present at $dest"
+    Sync-BundleResources
     exit 0
 }
 
@@ -71,6 +81,7 @@ try {
     }
 
     Write-Host "FFmpeg $Version installed to $dest"
+    Sync-BundleResources
 }
 finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

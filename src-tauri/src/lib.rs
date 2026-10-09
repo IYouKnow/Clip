@@ -261,6 +261,8 @@ fn reveal_clip(app: AppHandle, path: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             session: Mutex::new(None),
             stats: Mutex::new(None),
