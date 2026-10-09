@@ -23,9 +23,24 @@ export default function Home({ status, pollError, onChanged }: Props) {
   const [replayBusy, setReplayBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clips, setClips] = useState<Clip[]>([]);
+  const [now, setNow] = useState(() => Date.now());
 
   const replaying = status?.replaying ?? false;
+  const replayStartedMs = status?.replay_started_ms ?? null;
   const bufferSeconds = status?.buffer_seconds ?? 0;
+
+  // Tick while recording so the elapsed timer advances between status polls.
+  useEffect(() => {
+    if (!replaying) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [replaying]);
+
+  const recordedSeconds =
+    replaying && replayStartedMs
+      ? Math.max(0, Math.floor((now - replayStartedMs) / 1000))
+      : 0;
   const softwareEncoder = status?.encoder
     ? SOFTWARE_ENCODERS.includes(status.encoder)
     : false;
@@ -107,7 +122,11 @@ export default function Home({ status, pollError, onChanged }: Props) {
           </Banner>
         )}
 
-        <CapturePreview replaying={replaying} bufferSeconds={bufferSeconds} />
+        <CapturePreview
+          replaying={replaying}
+          bufferSeconds={bufferSeconds}
+          recordedSeconds={recordedSeconds}
+        />
 
         <div className="flex flex-col items-center gap-2.5">
           <div className="flex items-center justify-center gap-3">

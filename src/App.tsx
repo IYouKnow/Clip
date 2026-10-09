@@ -4,6 +4,7 @@ import { AppShell } from "./components/AppShell";
 import { Sidebar } from "./components/Sidebar";
 import { api, type Status } from "./lib/api";
 import type { View } from "./lib/nav";
+import { useSidebarCollapsed } from "./lib/sidebar";
 import { useTheme } from "./lib/theme";
 import { useUpdater } from "./lib/updater";
 import Home from "./views/Home";
@@ -13,6 +14,7 @@ import SettingsView from "./views/Settings";
 
 export default function App() {
   const { theme, setTheme } = useTheme();
+  const { collapsed, toggle: toggleSidebar } = useSidebarCollapsed();
   const [view, setView] = useState<View>("home");
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +63,8 @@ export default function App() {
           theme={theme}
           onThemeChange={setTheme}
           replaying={status?.replaying ?? false}
+          collapsed={collapsed}
+          onToggle={toggleSidebar}
         />
       }
     >

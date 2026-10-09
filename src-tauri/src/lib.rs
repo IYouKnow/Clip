@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::unbounded;
 use trace_engine::audio::{self, AudioCaptureHandle, AudioTrack, DeviceInfo, PcmChunk};
@@ -112,6 +112,8 @@ impl Default for Settings {
 #[derive(Debug, Clone, Serialize)]
 struct Status {
     replaying: bool,
+    /// Epoch milliseconds when the current replay session started, if running.
+    replay_started_ms: Option<u64>,
     encoder: Option<String>,
     /// Which capture→encode pipeline is active (e.g. "zero-copy gpu").
     pipeline: Option<String>,
@@ -154,6 +156,8 @@ struct MicTestStatus {
 struct AppState {
     session: Mutex<Option<ReplaySession>>,
     stats: Mutex<Option<Arc<SessionStats>>>,
+    /// Epoch milliseconds when the current replay session started.
+    replay_started_ms: Mutex<Option<u64>>,
     settings: Mutex<Settings>,
     /// Cached so the 1 Hz status poll does no filesystem or codec work.
     clips_dir: Mutex<Option<PathBuf>>,
@@ -166,6 +170,14 @@ struct AppState {
     tray: Mutex<Option<tray::TrayHandles>>,
     /// Set right before `app.exit` so the close handler stops hiding the window.
     quitting: AtomicBool,
+}
+
+/// Wall-clock epoch milliseconds, matching what the webview uses in `Date.now()`.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn clips_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -215,6 +227,11 @@ impl AppState {
         let stats = stats.as_deref();
         Status {
             replaying: stats.is_some(),
+            replay_started_ms: self
+                .replay_started_ms
+                .lock()
+                .ok()
+                .and_then(|started| *started),
             encoder: stats.and_then(SessionStats::encoder),
             pipeline: stats.and_then(|s| s.pipeline().map(|kind| kind.label().to_string())),
             frames: stats.map(SessionStats::frames).unwrap_or(0),
@@ -233,7 +250,7 @@ impl AppState {
 
 /// Starts capture if it is not already running and returns the fresh status.
 fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, String> {
-    {
+    let started_new = {
         let mut session = state.session.lock().map_err(|error| error.to_string())?;
         if session.is_none() {
             let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
@@ -265,6 +282,15 @@ fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, Strin
                 *current = Some(stats);
             }
             *session = Some(started);
+            true
+        } else {
+            false
+        }
+    };
+
+    if started_new {
+        if let Ok(mut started) = state.replay_started_ms.lock() {
+            *started = Some(now_ms());
         }
     }
 
@@ -279,6 +305,10 @@ fn stop_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, String
         .lock()
         .map_err(|error| error.to_string())?
         .take();
+
+    if let Ok(mut started) = state.replay_started_ms.lock() {
+        *started = None;
+    }
 
     // Report "stopped" as soon as the session is gone. Tearing capture down
     // joins OS threads and can take a while (or stall on a wedged GPU), so the
@@ -587,6 +617,7 @@ pub fn run() {
         .manage(AppState {
             session: Mutex::new(None),
             stats: Mutex::new(None),
+            replay_started_ms: Mutex::new(None),
             settings: Mutex::new(Settings::default()),
             clips_dir: Mutex::new(None),
             encoders: Mutex::new(None),

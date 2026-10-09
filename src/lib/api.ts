@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 
 export type Status = {
   replaying: boolean;
+  replay_started_ms: number | null;
   encoder: string | null;
   pipeline: string | null;
   frames: number;

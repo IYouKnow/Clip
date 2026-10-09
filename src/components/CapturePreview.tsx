@@ -4,9 +4,22 @@ import { cx } from "../lib/cx";
 type Props = {
   replaying: boolean;
   bufferSeconds: number;
+  recordedSeconds: number;
 };
 
-export function CapturePreview({ replaying, bufferSeconds }: Props) {
+/// `MM:SS`, or `H:MM:SS` once the recording passes an hour.
+function formatDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${pad(minutes)}:${pad(rest)}`
+    : `${pad(minutes)}:${pad(rest)}`;
+}
+
+export function CapturePreview({ replaying, bufferSeconds, recordedSeconds }: Props) {
   return (
     <div
       className={cx(
@@ -53,9 +66,17 @@ export function CapturePreview({ replaying, bufferSeconds }: Props) {
             {replaying ? "Buffering" : "Replay off"}
           </span>
           {replaying && (
-            <span className="rounded-full border border-white/10 bg-black/55 px-2.5 py-1 text-[11px] font-medium text-white/80 backdrop-blur">
-              last {bufferSeconds}s
-            </span>
+            <div className="flex items-center gap-2">
+              <span
+                title="Recording time"
+                className="rounded-full border border-white/10 bg-black/55 px-2.5 py-1 font-mono text-[11px] font-medium tabular-nums text-white/85 backdrop-blur"
+              >
+                {formatDuration(recordedSeconds)}
+              </span>
+              <span className="rounded-full border border-white/10 bg-black/55 px-2.5 py-1 text-[11px] font-medium text-white/80 backdrop-blur">
+                last {bufferSeconds}s
+              </span>
+            </div>
           )}
         </div>
       </div>

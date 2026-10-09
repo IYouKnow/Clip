@@ -1,3 +1,5 @@
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { cx } from "../lib/cx";
 import { NAV, type View } from "../lib/nav";
 import type { Theme } from "../lib/theme";
 import { NavItem } from "./NavItem";
@@ -10,25 +12,58 @@ type Props = {
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   replaying: boolean;
+  collapsed: boolean;
+  onToggle: () => void;
 };
 
-export function Sidebar({ view, onSelect, theme, onThemeChange, replaying }: Props) {
+export function Sidebar({
+  view,
+  onSelect,
+  theme,
+  onThemeChange,
+  replaying,
+  collapsed,
+  onToggle,
+}: Props) {
   return (
-    <aside className="flex w-[220px] shrink-0 flex-col border-r border-line bg-sidebar">
-      <nav aria-label="Main" className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2 py-2">
+    <aside
+      className={cx(
+        "flex shrink-0 flex-col border-r border-line bg-sidebar transition-[width] duration-200",
+        collapsed ? "w-16" : "w-[220px]",
+      )}
+    >
+      <div className={cx("flex items-center p-2", collapsed ? "justify-center" : "justify-end")}>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-pressed={collapsed}
+          className="grid size-8 cursor-pointer place-items-center rounded-[var(--radius-control)] text-ink-muted transition-colors duration-150 hover:bg-elevated hover:text-ink"
+        >
+          {collapsed ? (
+            <PanelLeftOpen className="size-4" />
+          ) : (
+            <PanelLeftClose className="size-4" />
+          )}
+        </button>
+      </div>
+
+      <nav aria-label="Main" className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-2">
         {NAV.map((entry) => (
           <NavItem
             key={entry.id}
             entry={entry}
             active={view === entry.id}
+            collapsed={collapsed}
             onSelect={() => onSelect(entry.id)}
           />
         ))}
       </nav>
 
       <div className="flex flex-col gap-2 border-t border-line p-2">
-        <StatusPill replaying={replaying} />
-        <ThemeToggle theme={theme} onChange={onThemeChange} />
+        <StatusPill replaying={replaying} collapsed={collapsed} />
+        <ThemeToggle theme={theme} collapsed={collapsed} onChange={onThemeChange} />
       </div>
     </aside>
   );

@@ -4,6 +4,7 @@ import type { Theme } from "../lib/theme";
 
 type Props = {
   theme: Theme;
+  collapsed?: boolean;
   onChange: (theme: Theme) => void;
 };
 
@@ -13,12 +14,15 @@ const OPTIONS: { value: Theme; label: string; icon: LucideIcon }[] = [
   { value: "dark", label: "Dark theme", icon: Moon },
 ];
 
-export function ThemeToggle({ theme, onChange }: Props) {
+export function ThemeToggle({ theme, collapsed, onChange }: Props) {
   return (
     <div
       role="radiogroup"
       aria-label="Theme"
-      className="flex items-center gap-0.5 rounded-[var(--radius-control)] border border-line bg-canvas p-0.5"
+      className={cx(
+        "flex items-center gap-0.5 rounded-[var(--radius-control)] border border-line bg-canvas p-0.5",
+        collapsed ? "flex-col" : "flex-row",
+      )}
     >
       {OPTIONS.map(({ value, label, icon: Icon }) => {
         const active = theme === value;
@@ -32,7 +36,8 @@ export function ThemeToggle({ theme, onChange }: Props) {
             title={label}
             onClick={() => onChange(value)}
             className={cx(
-              "grid h-7 flex-1 cursor-pointer place-items-center rounded-[6px] transition-colors duration-150",
+              "grid cursor-pointer place-items-center rounded-[6px] transition-colors duration-150",
+              collapsed ? "size-7" : "h-7 flex-1",
               active ? "bg-elevated text-ink" : "text-ink-faint hover:text-ink",
             )}
           >
