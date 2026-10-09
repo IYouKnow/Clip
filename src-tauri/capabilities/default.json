@@ -15,6 +15,7 @@
     "core:app:allow-version",
     "opener:default",
     "updater:default",
+    "notification:default",
     "process:default"
   ]
 }

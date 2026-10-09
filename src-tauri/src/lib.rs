@@ -1,7 +1,7 @@
 //! Tauri shell: exposes the replay engine and clip library to the UI.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -11,13 +11,15 @@ use trace_engine::encode;
 use trace_engine::session::{AudioConfig, ReplayConfig, ReplaySession, SessionStats};
 use trace_library::{self as library, ClipSummary};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 mod hotkeys;
 use hotkeys::{HotkeyAction, Hotkeys};
 mod settings;
+mod tray;
 
 /// Folder name under the user's Videos directory.
 const CLIPS_FOLDER: &str = "Trace";
@@ -162,6 +164,10 @@ struct AppState {
     bindings: Mutex<Vec<(Shortcut, HotkeyAction)>>,
     /// The running microphone test, if any.
     mic_test: Mutex<Option<MicTest>>,
+    /// Tray icon and menu handles, populated in `setup`.
+    tray: Mutex<Option<tray::TrayHandles>>,
+    /// Set right before `app.exit` so the close handler stops hiding the window.
+    quitting: AtomicBool,
 }
 
 fn clips_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -264,6 +270,7 @@ fn start_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, Strin
         }
     }
 
+    tray::refresh(app);
     Ok(state.status(app))
 }
 
@@ -291,6 +298,7 @@ fn stop_replay_inner(app: &AppHandle, state: &AppState) -> Result<Status, String
         });
     }
 
+    tray::refresh(app);
     Ok(state.status(app))
 }
 
@@ -643,6 +651,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
@@ -654,6 +663,8 @@ pub fn run() {
             hotkeys: Mutex::new(Hotkeys::default()),
             bindings: Mutex::new(Vec::new()),
             mic_test: Mutex::new(None),
+            tray: Mutex::new(None),
+            quitting: AtomicBool::new(false),
         })
         .setup(|app| {
             let handle = app.handle().clone();
@@ -670,7 +681,37 @@ pub fn run() {
             if let Err(error) = apply_hotkeys(&handle, &state, stored) {
                 eprintln!("failed to register stored hotkeys: {error}");
             }
+            if let Err(error) = tray::build(&handle) {
+                eprintln!("failed to create tray icon: {error}");
+            }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<AppState>();
+                // A quit from the tray asked to close for real.
+                if state.quitting.load(Ordering::SeqCst) {
+                    return;
+                }
+                api.prevent_close();
+                let _ = window.hide();
+                // The mic test is a diagnostic, not a recording: stop it silently.
+                stop_mic_test_inner(&state);
+                // Tell the user once that closing did not quit the app.
+                let app = window.app_handle();
+                let prefs = tray::load_prefs(app);
+                if !prefs.notice_shown {
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Trace is still running")
+                        .body(
+                            "Trace keeps capturing in the background. Right-click the tray icon to quit.",
+                        )
+                        .show();
+                    let _ = tray::persist_prefs(app, &tray::TrayPrefs { notice_shown: true });
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,

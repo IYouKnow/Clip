@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/AppShell";
 import { Sidebar } from "./components/Sidebar";
 import { api, type Status } from "./lib/api";
@@ -34,6 +35,17 @@ export default function App() {
     const timer = setInterval(refresh, 1000);
     return () => clearInterval(timer);
   }, [refresh]);
+
+  // The tray can ask the UI to switch views (e.g. "Open Library").
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<string>("navigate", (event) => setView(event.payload as View))
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
 
   // Check for a new release once at startup; the result lights up Settings.
   useEffect(() => {
